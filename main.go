@@ -6,6 +6,7 @@ package main
 //
 // 端点:
 //   GET|POST /search   搜索(q 必填;count/page/language 可选)
+//   GET      /languages 全部支持的语言/市场列表
 //   GET      /healthz  健康检查
 //   GET      /         服务信息
 
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -40,10 +42,20 @@ func envOr(key, def string) string {
 	return def
 }
 
+// version 由构建时通过 -ldflags 注入,如:
+//
+//	go build -ldflags "-X main.version=v1.0.0" .
+var version = "dev"
+
 func main() {
 	port := flag.String("port", envOr("PORT", "8080"), "HTTP 监听端口")
 	bingBase := flag.String("bing", envOr("BING_BASE", bingDefaultBase), "Bing 入口 URL")
+	showVer := flag.Bool("version", false, "打印版本号并退出")
 	flag.Parse()
+	if *showVer {
+		fmt.Println("bing-search-api", version)
+		return
+	}
 
 	srv := &server{
 		engine: &BingEngine{
@@ -54,6 +66,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search", srv.handleSearch)
+	mux.HandleFunc("/languages", srv.handleLanguages)
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/", srv.handleRoot)
 
@@ -101,6 +114,19 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 语言解析(与 SearXNG 行为一致):
+	//   - language=all/any     → 不限语言
+	//   - 未指定/auto          → 依次尝试 Accept-Language 头,失败则由 Bing 自动判断
+	//   - zh / zh-CN / zh-Hans → 统一映射到 Bing mkt 市场
+	market, err := resolveLanguage(p.Language, r.Header.Get("Accept-Language"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: err.Error(),
+			Query: p.Q,
+		})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -108,15 +134,21 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Term:     p.Q,
 		Count:    p.Count,
 		First:    (p.Page-1)*p.Count + 1,
-		Language: p.Language,
+		Language: market,
 	})
 	if err != nil {
-		log.Printf("搜索失败 q=%q: %v", p.Q, err)
+		log.Printf("搜索失败 q=%q lang=%q: %v", p.Q, market, err)
 		writeJSON(w, http.StatusBadGateway, ErrorResponse{
 			Error: "Bing 查询失败: " + err.Error(),
 			Query: p.Q,
 		})
 		return
+	}
+	// 响应标注实际生效的语言(空 = 不限)
+	if market == "" {
+		resp.Language = "all"
+	} else {
+		resp.Language = market
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -124,6 +156,17 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 // handleHealth 健康检查
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleLanguages 列出全部支持的语言/市场
+func (s *server) handleLanguages(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":     len(languages),
+		"special":   []string{"all", "auto"},
+		"languages": languages,
+		"usage":     "/search?q=example&language=zh-CN",
+		"note":      "language 支持 语言代码(zh)、语言-地区代码(zh-CN)、别名(zh-Hans、es-419)与 all(不限语言);未指定时自动使用 Accept-Language 请求头,行为与 SearXNG 一致",
+	})
 }
 
 // handleRoot 服务信息
@@ -134,10 +177,13 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":        "bing-search-api",
+		"version":     version,
 		"description": "SearXNG 风格的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
 		"engine":      "bing",
+		"languages":   len(languages),
 		"endpoints": map[string]string{
-			"GET|POST /search": "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN)",
+			"GET|POST /search": "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
+			"GET /languages":   "全部支持的语言/市场列表",
 			"GET /healthz":     "健康检查",
 		},
 		"example": "/search?q=golang&count=10&page=1&language=zh-CN",

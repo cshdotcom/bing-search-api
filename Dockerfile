@@ -1,9 +1,12 @@
 # ---------- 构建阶段 ----------
 FROM golang:1.22-alpine AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/bing-search-api .
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/bing-search-api .
 
 # ---------- 运行阶段 ----------
 FROM alpine:3.20

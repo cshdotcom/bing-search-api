@@ -16,8 +16,10 @@ type Result struct {
 // SearchResponse SearXNG 风格的搜索响应。
 // 本服务只有 bing 一个引擎,answers / corrections / infoboxes 恒为空数组,
 // 与 SearXNG 单引擎模式下的返回结构保持一致。
+// language 为本服务扩展字段,标注实际生效的语言(市场代码或 all)。
 type SearchResponse struct {
 	Query               string   `json:"query"`
+	Language            string   `json:"language"`
 	NumberOfResults     int      `json:"number_of_results"`
 	Results             []Result `json:"results"`
 	Answers             []string `json:"answers"`
