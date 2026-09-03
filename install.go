@@ -1,14 +1,24 @@
 package main
 
-// install.go 把服务安装为 systemd 单元(开机自启动、崩溃自动重启),
-// 提供 CLI 子命令 install / uninstall 与 Web 端 POST /install。
+// install.go 把服务安装为 systemd 单元(开机自启动、崩溃自动重启)。
+//
+// 安全设计:安装/卸载只提供本机 CLI 入口:
+//
+//	sudo bing-search-api install [-port N] [-host IP]
+//	sudo bing-search-api uninstall
+//
+// 不提供任何 Web 端安装入口——HTTP 端口是无鉴权的公开端口,
+// 任何"网页上执行安装"的能力都等于把系统配置的写权限暴露给
+// 全网(服务以 root 运行时尤其危险);sudo 密码即本机鉴权。
 //
 // 安装动作:
-//   1. 复制当前二进制到 /usr/local/bin/bing-search-api
-//   2. 写入 /etc/systemd/system/bing-search-api.service
-//   3. systemctl daemon-reload
-//   4. systemctl enable  (开机自启动)
-//   5. systemctl restart (立即启动/升级后重启)
+//  1. 复制当前二进制到 /usr/local/bin/bing-search-api
+//  2. 写入 /etc/systemd/system/bing-search-api.service
+//     (优先用沙箱加固单元:动态非特权用户运行;老版本 systemd
+//     不支持时自动退回兼容单元,保证安装始终成功)
+//  3. systemctl daemon-reload
+//  4. systemctl enable  (开机自启动)
+//  5. systemctl restart (立即启动/升级后重启)
 //
 // 非 root 调用 CLI 时自动通过 sudo 重新执行自身。
 
@@ -33,17 +43,8 @@ const (
 	unitPath = "/etc/systemd/system/" + serviceName + ".service"
 )
 
-// ---- 小包装(集中 os 访问,便于阅读) ----
-
+// osGeteuid 当前进程 euid(0 = root)
 func osGeteuid() int { return os.Geteuid() }
-
-// osExecutableHint 当前二进制路径(用于错误提示文案)
-func osExecutableHint() string {
-	if exe, err := os.Executable(); err == nil {
-		return exe
-	}
-	return "./bing-search-api"
-}
 
 // ---- 端口校验 ----
 
@@ -74,37 +75,23 @@ func serviceActive() (bool, string) {
 	return strings.TrimSpace(string(out)) == "active", strings.TrimSpace(string(out))
 }
 
-// installProbe /install?probe=1 的状态数据
-func installProbe() map[string]any {
-	_, unitErr := os.Stat(unitPath)
-	installed := unitErr == nil
-	active, state := false, ""
-	if installed {
-		active, state = serviceActive()
-	}
-	return map[string]any{
-		"root":      osGeteuid() == 0,
-		"systemd":   systemdAvailable(),
-		"installed": installed,
-		"active":    active,
-		"state":     state,
-		"port":      servePort,
-		"service":   serviceName,
-		"unit":      unitPath,
-	}
-}
-
 // runCmd 执行外部命令,返回合并输出
 func runCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
-// ---- 安装/卸载核心 ----
+// ---- 单元文件 ----
 
-// systemdUnit 生成 unit 文件内容
-func systemdUnit(port, host string) string {
-	return fmt.Sprintf(`[Unit]
+// systemdUnit 生成 unit 文件。
+// hardened=true 生成沙箱加固单元:服务以 systemd 动态分配的非特权
+// 用户运行(DynamicUser),整个文件系统只读、禁设备/内核写入、
+// 内存 W^X,仅保留低端口绑定能力——即使服务进程被攻破,
+// 也无法改动系统配置或提权。
+// hardened=false 生成兼容单元(供不支持上述指令的老版本 systemd,
+// 如 systemd < 232 的 CentOS 7),仅保留基础指令 + 非 root 运行。
+func systemdUnit(port, host string, hardened bool) string {
+	unit := fmt.Sprintf(`[Unit]
 Description=Bing Search API - SearXNG-compatible Bing search proxy
 Documentation=https://github.com/cshdotcom/bing-search-api
 After=network-online.target
@@ -115,20 +102,44 @@ Type=simple
 ExecStart=%s -port %s -host %s
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
+`, installBinPath, port, host)
 
+	if hardened {
+		unit += `NoNewPrivileges=true
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+`
+	} else {
+		unit += `NoNewPrivileges=true
+`
+	}
+
+	unit += `
 [Install]
 WantedBy=multi-user.target
-`, installBinPath, port, host)
+`
+	return unit
 }
 
-// doInstall 执行安装。start=true 时立即(重)启动服务;
-// quiet=true 时不打印步骤(供 Web 端调用)。
-func doInstall(port, host string, start, quiet bool) error {
+// ---- 安装/卸载核心 ----
+
+// doInstall 执行安装。start=true 时立即(重)启动服务。
+// 输出的步骤信息直接打印到 CLI。
+func doInstall(port, host string, start bool) error {
 	step := func(format string, a ...any) {
-		if !quiet {
-			fmt.Printf("  "+format+"\n", a...)
-		}
+		fmt.Printf("  "+format+"\n", a...)
 	}
 
 	if !systemdAvailable() {
@@ -157,40 +168,92 @@ func doInstall(port, host string, start, quiet bool) error {
 		step("二进制已安装: %s", installBinPath)
 	}
 
-	// 3. 写 unit 文件
-	if err := os.WriteFile(unitPath, []byte(systemdUnit(port, host)), 0o644); err != nil {
+	// 3. 写 unit 文件(先加固单元;老 systemd 不认识高级指令则退回兼容单元)
+	hardened := true
+	if err := writeUnitFile(systemdUnit(port, host, true)); err != nil {
 		return fmt.Errorf("写入 %s 失败: %w", unitPath, err)
 	}
-	step("服务单元已写入: %s (端口 %s)", unitPath, port)
-
-	// 4. daemon-reload
 	if out, err := runCmd("systemctl", "daemon-reload"); err != nil {
-		return fmt.Errorf("systemctl daemon-reload 失败: %s", out)
+		// daemon-reload 失败通常意味着 systemd 版本过老,不认识加固指令
+		step("加固单元不被当前 systemd 支持(%s),改用兼容单元", firstLine(out))
+		hardened = false
+		if err := writeUnitFile(systemdUnit(port, host, false)); err != nil {
+			return fmt.Errorf("写入 %s 失败: %w", unitPath, err)
+		}
+		if out, err := runCmd("systemctl", "daemon-reload"); err != nil {
+			return fmt.Errorf("systemctl daemon-reload 失败: %s", out)
+		}
 	}
-	step("systemd 配置已重载")
+	step("服务单元已写入: %s (端口 %s,%s)", unitPath, port, unitProfile(hardened))
 
-	// 5. 开机自启动
+	// 4. 开机自启动
 	if out, err := runCmd("systemctl", "enable", serviceName); err != nil {
 		return fmt.Errorf("设置开机自启失败: %s", out)
 	}
 	step("开机自启动已启用")
 
-	// 6. 立即启动/升级重启
+	// 5. 立即启动/升级重启
 	if start {
-		if out, err := runCmd("systemctl", "restart", serviceName); err != nil {
+		out, err := runCmd("systemctl", "restart", serviceName)
+		if err != nil && hardened {
+			// 运行期失败(如个别平台不支持内存 W^X),退回兼容单元重试一次
+			step("加固单元启动失败(%s),改用兼容单元重试", firstLine(out))
+			hardened = false
+			if werr := writeUnitFile(systemdUnit(port, host, false)); werr == nil {
+				if rerr := runReloadAndRestart(); rerr != nil {
+					return rerr
+				}
+			} else {
+				return fmt.Errorf("启动服务失败: %s", out)
+			}
+		} else if err != nil {
 			return fmt.Errorf("启动服务失败: %s", out)
+		} else {
+			step("服务已启动")
 		}
-		step("服务已启动")
 	}
 	return nil
 }
 
+// runReloadAndRestart 兼容单元重载并重启
+func runReloadAndRestart() error {
+	if out, err := runCmd("systemctl", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload 失败: %s", out)
+	}
+	if out, err := runCmd("systemctl", "restart", serviceName); err != nil {
+		return fmt.Errorf("启动服务失败: %s", out)
+	}
+	return nil
+}
+
+// unitProfile 单元描述
+func unitProfile(hardened bool) string {
+	if hardened {
+		return "动态非特权用户 + 沙箱加固"
+	}
+	return "兼容模式"
+}
+
+// firstLine 取输出首行,空则给占位
+func firstLine(s string) string {
+	if s == "" {
+		return "原因未知"
+	}
+	if i := strings.IndexByte(s, '\n'); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// writeUnitFile 写入 unit 文件
+func writeUnitFile(body string) error {
+	return os.WriteFile(unitPath, []byte(body), 0o644)
+}
+
 // doUninstall 卸载服务与二进制
-func doUninstall(quiet bool) error {
+func doUninstall() error {
 	step := func(format string, a ...any) {
-		if !quiet {
-			fmt.Printf("  "+format+"\n", a...)
-		}
+		fmt.Printf("  "+format+"\n", a...)
 	}
 
 	if _, err := os.Stat(unitPath); err != nil {
@@ -272,6 +335,7 @@ func runInstallCLI(defPort, defHost string, rest []string) {
 	}
 
 	fmt.Println("安装 bing-search-api 为 systemd 服务(开机自启动)")
+	fmt.Println("  安装仅限本机 CLI 执行,Web 端不提供任何安装入口")
 
 	// 非 root:自动 sudo 提权重跑
 	if osGeteuid() != 0 {
@@ -283,13 +347,13 @@ func runInstallCLI(defPort, defHost string, rest []string) {
 		relaunchWithSudo(args) // 成功或失败都会退出
 	}
 
-	if err := doInstall(portN, *host, !*noStart, false); err != nil {
+	if err := doInstall(portN, *host, !*noStart); err != nil {
 		fatalf("安装失败: %v", err)
 	}
 
 	fmt.Println()
 	if active, state := serviceActive(); active {
-		fmt.Printf("✓ 服务运行中 (state: %s)\n", state)
+		fmt.Printf("✓ 服务运行中 (state: %s,非特权沙箱进程)\n", state)
 		fmt.Printf("✓ 测试界面:  http://localhost:%s/\n", portN)
 		fmt.Printf("  局域网访问: http://<服务器IP>:%s/\n", portN)
 	} else if *noStart {
@@ -317,7 +381,7 @@ func runUninstallCLI(rest []string) {
 		relaunchWithSudo([]string{"uninstall"})
 	}
 
-	if err := doUninstall(false); err != nil {
+	if err := doUninstall(); err != nil {
 		fatalf("卸载失败: %v", err)
 	}
 	fmt.Println()

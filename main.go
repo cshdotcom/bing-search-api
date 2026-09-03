@@ -6,7 +6,7 @@ package main
 //
 // CLI 子命令:
 //   (默认)              前台启动 HTTP 服务
-//   install             安装为 systemd 服务并设开机自启动(自动 sudo 提权)
+//   install             安装为 systemd 服务并设开机自启动(自动 sudo 提权,仅限本机终端)
 //   uninstall           卸载 systemd 服务与二进制
 //   help                终端打印帮助
 //   version             打印版本号
@@ -15,9 +15,11 @@ package main
 //   GET|POST /search    搜索(q 必填;count/page/language 可选)
 //   GET      /languages 全部支持的语言/市场列表
 //   GET      /help      帮助文档页
-//   GET|POST /install   安装向导页 / 在权限内执行安装
 //   GET      /healthz   健康检查
 //   GET      /          测试界面(浏览器)/ 服务信息 JSON(curl)
+//
+// 安全:安装/卸载仅限本机 CLI(sudo bing-search-api install),
+// 不提供任何 Web 端安装入口。
 
 import (
 	"context"
@@ -161,7 +163,7 @@ func printHelp(w *os.File) {
 
 子命令:
   (默认)       前台启动 HTTP 服务
-  install      安装为 systemd 服务并设开机自启动(非 root 自动 sudo 提权)
+  install      安装为 systemd 服务并设开机自启动(非 root 自动 sudo 提权;仅限本机终端执行,Web 端无安装入口)
   uninstall    卸载 systemd 服务与二进制
   help         显示本帮助
   version      打印版本号
@@ -188,14 +190,13 @@ install 专属参数:
 Web 界面(服务启动后浏览器访问):
   http://localhost:%s/          测试界面(直接搜索,语言/分页可选)
   http://localhost:%s/help      帮助文档(端点/参数/管理命令)
-  http://localhost:%s/install   安装向导
 
 API:
   GET|POST /search    搜索:q(必填)、count、page(兼容 pageno)、language(zh-CN/ja-JP/…/all)
   GET      /languages 全部 %d 个语言/市场
   GET      /healthz   健康检查
   https://github.com/cshdotcom/bing-search-api
-`, version, defaultPort, defaultPort, defaultPort, len(languages))
+`, version, defaultPort, defaultPort, len(languages))
 }
 
 // printSubUsage 子命令的 -h 说明
@@ -224,7 +225,6 @@ func serve(port, host, bingBase string) {
 	mux.HandleFunc("/languages", srv.handleLanguages)
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/help", srv.handleHelpPage)
-	mux.HandleFunc("/install", srv.handleInstallPage)
 	mux.HandleFunc("/", srv.handleRoot)
 
 	addr := host + ":" + portN
@@ -238,7 +238,7 @@ func serve(port, host, bingBase string) {
 
 	go func() {
 		log.Printf("bing-search-api %s 已启动: http://localhost:%s/ (测试界面)", version, portN)
-		log.Printf("帮助文档: /help   安装向导: /install   API: /search   语言: /languages (Bing: %s)", bingBase)
+		log.Printf("帮助文档: /help   API: /search   语言: /languages (Bing: %s)", bingBase)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("服务启动失败: %v", err)
 		}

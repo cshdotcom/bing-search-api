@@ -2,12 +2,13 @@ package main
 
 // web.go Web 界面路由:
 //
-//   GET  /            测试界面(浏览器);curl 或 Accept: application/json 时返回服务信息 JSON
-//   GET  /help        帮助文档页(端点/参数/CLI/systemd 管理说明)
-//   GET  /install     安装向导页(?probe=1 返回状态 JSON)
-//   POST /install     在当前进程权限内执行 systemd 安装(需 root)
+//	GET  /       测试界面(浏览器);curl 或 Accept: application/json 时返回服务信息 JSON
+//	GET  /help   帮助文档页(端点/参数/CLI/systemd 管理说明)
 //
-// 所有页面均为内联 HTML(见 pages.go),无外部资源,离线可用。
+// 安全设计:安装/卸载只提供本机 CLI(sudo bing-search-api install),
+// 不设任何 Web 端安装入口——HTTP 端口无鉴权,不能暴露系统写权限。
+//
+// 所有页面均为内联 HTML(见 pages.go / pages_help.go),无外部资源,离线可用。
 
 import (
 	"net/http"
@@ -48,7 +49,7 @@ func renderPage(tpl string) string {
 	return r.Replace(tpl)
 }
 
-// itoa 局部小工具,避免 web.go 依赖 strconv
+// itoa 局部小工具,避免引入 strconv
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -89,10 +90,8 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 				"GET|POST /search": "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
 				"GET /languages":   "全部支持的语言/市场列表",
 				"GET /help":        "帮助文档(浏览器打开)",
-				"GET /install":     "systemd 安装向导(浏览器打开)",
-				"POST /install":    "以服务进程权限执行安装(需 root,建议用 CLI)",
 				"GET /healthz":     "健康检查",
-				"CLI":              "help | install | uninstall | version | -port N | -host IP",
+				"CLI":              "help | install(仅本机) | uninstall | version | -port N | -host IP",
 			},
 			"example": "/search?q=golang&count=10&page=1&language=zh-CN",
 		})
@@ -108,66 +107,4 @@ func (s *server) handleHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTML(w, http.StatusOK, renderPage(helpPageHTML))
-}
-
-// handleInstallPage 安装向导页
-//
-//	GET  /install          → HTML 向导(状态检测 + 命令展示 + 一键安装按钮)
-//	GET  /install?probe=1  → JSON 状态(供页面 JS 与脚本使用)
-//	POST /install          → 在服务进程权限内执行安装
-func (s *server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		if r.FormValue("probe") != "" {
-			writeJSON(w, http.StatusOK, installProbe())
-			return
-		}
-		writeHTML(w, http.StatusOK, renderPage(installPageHTML))
-	case http.MethodPost:
-		s.handleInstallExec(w, r)
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "仅支持 GET / POST"})
-	}
-}
-
-// handleInstallExec Web 端执行安装。
-// 服务进程通常并非 root,此时返回 403 + 指引(推荐用 CLI 的 sudo install)。
-func (s *server) handleInstallExec(w http.ResponseWriter, r *http.Request) {
-	port := strings.TrimSpace(r.FormValue("port"))
-	if port == "" {
-		port = servePort
-	}
-	if p, err := normalizePort(port); err == nil {
-		port = p
-	} else {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "端口无效: " + err.Error()})
-		return
-	}
-	host := strings.TrimSpace(r.FormValue("host"))
-	if host == "" {
-		host = "0.0.0.0"
-	}
-
-	if osGeteuid() != 0 {
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": "当前服务进程不是 root,无法直接安装 systemd 服务",
-			"hint":  "请在服务器终端执行: sudo " + osExecutableHint() + " install -port " + port,
-			"note":  "CLI 的 install 子命令会自动通过 sudo 提权,复制二进制到 /usr/local/bin,注册 systemd 服务并设置开机自启动",
-		})
-		return
-	}
-	if err := doInstall(port, host, true, true); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": err.Error(),
-			"hint":  "可改在终端执行: sudo bing-search-api install -port " + port,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"service": serviceName,
-		"unit":    unitPath,
-		"port":    port,
-		"manage":  "systemctl status|restart|stop " + serviceName,
-	})
 }

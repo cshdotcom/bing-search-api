@@ -107,7 +107,6 @@ footer{margin-top:26px;font-size:12.5px;color:var(--dim);text-align:center}
   <nav>
     <a href="/help">帮助文档</a>
     <a href="/languages">语言列表</a>
-    <a href="/install">安装服务</a>
     <a href="https://github.com/cshdotcom/bing-search-api" target="_blank">GitHub</a>
   </nav>
 </header>
