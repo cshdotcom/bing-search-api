@@ -4,11 +4,20 @@ package main
 // 只抓取 Bing 一个引擎,不重排序、不聚合,把 Bing 的原始结果
 // 顺序整理成 JSON 通过 API 返回。
 //
+// CLI 子命令:
+//   (默认)              前台启动 HTTP 服务
+//   install             安装为 systemd 服务并设开机自启动(自动 sudo 提权)
+//   uninstall           卸载 systemd 服务与二进制
+//   help                终端打印帮助
+//   version             打印版本号
+//
 // 端点:
-//   GET|POST /search   搜索(q 必填;count/page/language 可选)
+//   GET|POST /search    搜索(q 必填;count/page/language 可选)
 //   GET      /languages 全部支持的语言/市场列表
-//   GET      /healthz  健康检查
-//   GET      /         服务信息
+//   GET      /help      帮助文档页
+//   GET|POST /install   安装向导页 / 在权限内执行安装
+//   GET      /healthz   健康检查
+//   GET      /          测试界面(浏览器)/ 服务信息 JSON(curl)
 
 import (
 	"context"
@@ -44,22 +53,168 @@ func envOr(key, def string) string {
 
 // version 由构建时通过 -ldflags 注入,如:
 //
-//	go build -ldflags "-X main.version=v1.0.0" .
+//	go build -ldflags "-X main.version=v1.1.0" .
 var version = "dev"
 
+// servePort 当前服务的监听端口(页面渲染用),启动时赋值
+var servePort = "8080"
+
+const defaultPort = "8080"
+
+// main CLI 入口:支持 "子命令在前、flag 在后"(install -port 9000)
+// 与 "flag 在前、子命令在后"(-port 9000 install)两种写法。
 func main() {
-	port := flag.String("port", envOr("PORT", "8080"), "HTTP 监听端口")
-	bingBase := flag.String("bing", envOr("BING_BASE", bingDefaultBase), "Bing 入口 URL")
-	showVer := flag.Bool("version", false, "打印版本号并退出")
-	flag.Parse()
-	if *showVer {
+	head, sub, rest := splitArgs(os.Args[1:])
+
+	// 全局 flag(出现在子命令之前的部分)
+	global := flag.NewFlagSet("bing-search-api", flag.ExitOnError)
+	global.SetOutput(os.Stderr)
+	global.Usage = func() { printHelp(os.Stdout) }
+	gPort := global.String("port", envOr("PORT", defaultPort), "HTTP 监听端口")
+	gHost := global.String("host", envOr("HOST", "0.0.0.0"), "HTTP 监听地址")
+	gBing := global.String("bing", envOr("BING_BASE", bingDefaultBase), "Bing 入口 URL")
+	gVer := global.Bool("version", false, "打印版本号并退出")
+	_ = global.Parse(head)
+
+	if *gVer {
 		fmt.Println("bing-search-api", version)
 		return
 	}
 
+	switch sub {
+	case "", "serve", "run":
+		// 服务子命令:允许 flag 出现在子命令之后,覆盖全局默认
+		fs := flag.NewFlagSet("serve", flag.ExitOnError)
+		fs.SetOutput(os.Stderr)
+		fs.Usage = func() { printHelp(os.Stderr) }
+		p := fs.String("port", *gPort, "HTTP 监听端口")
+		h := fs.String("host", *gHost, "HTTP 监听地址")
+		b := fs.String("bing", *gBing, "Bing 入口 URL")
+		if len(rest) > 0 {
+			_ = fs.Parse(rest)
+		}
+		serve(*p, *h, *b)
+
+	case "help", "-h", "--help":
+		printHelp(os.Stdout)
+
+	case "version", "-v", "--version":
+		fmt.Println("bing-search-api", version)
+
+	case "install":
+		runInstallCLI(*gPort, *gHost, rest)
+
+	case "uninstall", "remove":
+		runUninstallCLI(rest)
+
+	default:
+		fmt.Fprintf(os.Stderr, "未知子命令: %q\n\n", sub)
+		printHelp(os.Stderr)
+		os.Exit(2)
+	}
+}
+
+// splitArgs 把命令行参数拆为:
+// head = 子命令之前的全局 flag 部分;sub = 第一个位置参数(子命令);
+// rest = 子命令之后的参数。没有子命令时 head = 全部参数。
+func splitArgs(args []string) (head []string, sub string, rest []string) {
+	valueFlags := map[string]bool{
+		"-port": true, "-host": true, "-bing": true,
+	}
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			// 之后视为 flag 区域(罕见用法)
+			head = append(head, args[i:]...)
+			return head, "", nil
+		}
+		if strings.HasPrefix(a, "-") && a != "-" {
+			if strings.Contains(a, "=") {
+				head = append(head, a)
+				i++
+				continue
+			}
+			head = append(head, a)
+			if valueFlags[a] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				// 已知值型 flag:连同取值一起归入 head
+				head = append(head, args[i+1])
+				i += 2
+				continue
+			}
+			// 布尔 flag 或未知 flag(交给 flag.Parse 报错):单 token 归入 head
+			i++
+			continue
+		}
+		// 第一个位置参数 = 子命令
+		return head, a, args[i+1:]
+	}
+	return head, "", nil
+}
+
+// printHelp 终端帮助文本
+func printHelp(w *os.File) {
+	fmt.Fprintf(w, `bing-search-api %s — SearXNG 风格的极简 Bing 搜索服务
+
+用法:
+  bing-search-api [子命令] [参数]
+
+子命令:
+  (默认)       前台启动 HTTP 服务
+  install      安装为 systemd 服务并设开机自启动(非 root 自动 sudo 提权)
+  uninstall    卸载 systemd 服务与二进制
+  help         显示本帮助
+  version      打印版本号
+
+通用参数(写在子命令前或后均可):
+  -port N      HTTP 监听端口(默认 8080,或环境变量 PORT)
+  -host IP     监听地址(默认 0.0.0.0)
+  -bing URL    Bing 入口(默认 https://www.bing.com,可设 https://cn.bing.com)
+
+install 专属参数:
+  -no-start    只注册服务,不立即启动
+
+示例:
+  bing-search-api                        前台启动,默认 8080
+  bing-search-api -port 9000             指定端口启动
+  bing-search-api install -port 9000     安装 systemd 服务,端口 9000
+  sudo bing-search-api install           安装(install 内部会自动提权,可不加 sudo)
+  sudo bing-search-api uninstall         卸载
+
+服务安装后管理:
+  systemctl status|start|stop|restart bing-search-api
+  journalctl -u bing-search-api -f
+
+Web 界面(服务启动后浏览器访问):
+  http://localhost:%s/          测试界面(直接搜索,语言/分页可选)
+  http://localhost:%s/help      帮助文档(端点/参数/管理命令)
+  http://localhost:%s/install   安装向导
+
+API:
+  GET|POST /search    搜索:q(必填)、count、page(兼容 pageno)、language(zh-CN/ja-JP/…/all)
+  GET      /languages 全部 %d 个语言/市场
+  GET      /healthz   健康检查
+  https://github.com/cshdotcom/bing-search-api
+`, version, defaultPort, defaultPort, defaultPort, len(languages))
+}
+
+// printSubUsage 子命令的 -h 说明
+func printSubUsage(fs *flag.FlagSet, name string) {
+	fmt.Fprintf(os.Stderr, "用法: bing-search-api %s [参数]\n\n", name)
+	fs.PrintDefaults()
+}
+
+// serve 前台启动 HTTP 服务
+func serve(port, host, bingBase string) {
+	portN, err := normalizePort(port)
+	if err != nil {
+		fatalf("端口参数无效: %v", err)
+	}
+	servePort = portN
+
 	srv := &server{
 		engine: &BingEngine{
-			Base:   *bingBase,
+			Base:   bingBase,
 			Client: &http.Client{Timeout: 15 * time.Second},
 		},
 	}
@@ -68,10 +223,13 @@ func main() {
 	mux.HandleFunc("/search", srv.handleSearch)
 	mux.HandleFunc("/languages", srv.handleLanguages)
 	mux.HandleFunc("/healthz", srv.handleHealth)
+	mux.HandleFunc("/help", srv.handleHelpPage)
+	mux.HandleFunc("/install", srv.handleInstallPage)
 	mux.HandleFunc("/", srv.handleRoot)
 
+	addr := host + ":" + portN
 	httpSrv := &http.Server{
-		Addr:              ":" + *port,
+		Addr:              addr,
 		Handler:           withRecover(withCORS(withLog(mux))),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       20 * time.Second,
@@ -79,7 +237,8 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("bing-search-api 已启动,监听 :%s (Bing: %s)", *port, *bingBase)
+		log.Printf("bing-search-api %s 已启动: http://localhost:%s/ (测试界面)", version, portN)
+		log.Printf("帮助文档: /help   安装向导: /install   API: /search   语言: /languages (Bing: %s)", bingBase)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("服务启动失败: %v", err)
 		}
@@ -166,27 +325,6 @@ func (s *server) handleLanguages(w http.ResponseWriter, r *http.Request) {
 		"languages": languages,
 		"usage":     "/search?q=example&language=zh-CN",
 		"note":      "language 支持 语言代码(zh)、语言-地区代码(zh-CN)、别名(zh-Hans、es-419)与 all(不限语言);未指定时自动使用 Accept-Language 请求头,行为与 SearXNG 一致",
-	})
-}
-
-// handleRoot 服务信息
-func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "接口不存在: " + r.URL.Path})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":        "bing-search-api",
-		"version":     version,
-		"description": "SearXNG 风格的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
-		"engine":      "bing",
-		"languages":   len(languages),
-		"endpoints": map[string]string{
-			"GET|POST /search": "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
-			"GET /languages":   "全部支持的语言/市场列表",
-			"GET /healthz":     "健康检查",
-		},
-		"example": "/search?q=golang&count=10&page=1&language=zh-CN",
 	})
 }
 
