@@ -114,16 +114,25 @@ footer{margin-top:26px;font-size:12.5px;color:var(--dim);text-align:center}
 <div class="card">
   <div class="searchbar">
     <input id="q" type="text" placeholder="输入关键词,回车或点击搜索(仅 Bing,结果保持原始顺序)" autocomplete="off" autofocus>
-    <button id="go" onclick="doSearch(1)">搜 索</button>
+    <button id="go" onclick="doSearchReset()">搜 索</button>
   </div>
   <div class="opts">
-    <label>语言
+    <label>接口
+      <select id="mode">
+        <option value="searxng">SearXNG 兼容 · /search</option>
+        <option value="bing">Bing 官方 API v7 · /v7/search</option>
+      </select>
+    </label>
+    <label><span id="langLabel">语言</span>
       <select id="lang"><option value="auto">auto · 浏览器语言</option><option value="all">all · 不限语言</option></select>
     </label>
     <label>每页
       <select id="count"><option>10</option><option>20</option><option>30</option><option>50</option></select>
     </label>
-    <label>页码 <input id="page" type="number" min="1" max="100" value="1"></label>
+    <label><span id="pageLabel">页码</span> <input id="page" type="number" min="1" max="100" value="1"></label>
+    <label id="safeRow" style="display:none">safeSearch
+      <select id="safe"><option>Moderate</option><option>Off</option><option>Strict</option></select>
+    </label>
   </div>
   <div id="notice" class="notice"></div>
   <div id="statusbar" class="statusbar"></div>
@@ -144,12 +153,26 @@ footer{margin-top:26px;font-size:12.5px;color:var(--dim);text-align:center}
   </div>
 </div>
 
-<footer>仅抓取 Bing 网页结果 · 响应结构与 SearXNG 兼容 · 端口 __PORT__ · <a href="/help">API 文档</a></footer>
+<footer>仅抓取 Bing 网页结果 · SearXNG 兼容 + Bing 官方 API v7 兼容 · 端口 __PORT__ · <a href="/help">API 文档</a></footer>
 </div>
 
 <script>
 var $=function(s){return document.querySelector(s)};
 var LANGS=null;
+var MODE='searxng'; // searxng = /search;bing = /v7/search(官方 API 兼容)
+
+// 接口模式切换:label 与参数随模式自适应
+$('#mode').addEventListener('change',function(){
+  MODE=this.value;
+  var v7=MODE==='bing';
+  $('#langLabel').textContent=v7?'mkt':'语言';
+  $('#pageLabel').textContent=v7?'offset':'页码';
+  $('#safeRow').style.display=v7?'':'none';
+  var pg=$('#page');
+  pg.min=v7?'0':'1';
+  pg.max=v7?'9000':'100';
+  pg.value=v7?'0':'1';
+});
 
 // 语言下拉:从 /languages 动态加载
 fetch('/languages').then(function(r){return r.json()}).then(function(d){
@@ -176,25 +199,33 @@ fetch('/languages').then(function(r){return r.json()}).then(function(d){
   if(best)sel.value=best.code;
 }).catch(function(){});
 
-$('#q').addEventListener('keydown',function(e){if(e.key==='Enter')doSearch(1)});
+$('#q').addEventListener('keydown',function(e){if(e.key==='Enter')doSearchReset()});
+
+// 新搜索的起始点:searxng 第 1 页,bing v7 offset 0
+function doSearchReset(){doSearch(MODE==='bing'?0:1)}
 
 function showNotice(cls,msg){var n=$('#notice');n.className='notice '+cls;n.textContent=msg;n.style.display='block';if(cls==='err')window.scrollTo({top:0,behavior:'smooth'})}
 function hideNotice(){$('#notice').style.display='none'}
 
 var LAST=null;
 
-function doSearch(page){
+function doSearch(pg){
   var q=$('#q').value.trim();
   if(!q){showNotice('warn','请输入查询词');return}
-  $('#page').value=page;
+  $('#page').value=pg;
   hideNotice();
   var btn=$('#go');btn.disabled=true;btn.innerHTML='<span class="spin"></span>搜索中';
-  var p={q:q,count:$('#count').value,page:page};
-  var lang=$('#lang').value;
-  if(lang!=='auto')p.language=lang;
-  var qs=new URLSearchParams(p).toString();
-  var url='/search?'+qs;
-  var t0=performance.now();
+  var url,t0=performance.now(),lang=$('#lang').value;
+  if(MODE==='bing'){
+    // Bing 官方 API v7 兼容:q/count/offset/mkt/safeSearch
+    var p={q:q,count:$('#count').value,offset:pg,safeSearch:$('#safe').value};
+    if(lang!=='auto'&&lang!=='all')p.mkt=lang;
+    url='/v7/search?'+new URLSearchParams(p).toString();
+  }else{
+    var p={q:q,count:$('#count').value,page:pg};
+    if(lang!=='auto')p.language=lang;
+    url='/search?'+new URLSearchParams(p).toString();
+  }
   fetch(url).then(function(r){
     return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d}})
   }).then(function(res){
@@ -207,6 +238,14 @@ function doSearch(page){
   });
 }
 
+// 错误消息兼容两种格式:/search 的 {error} 与 v7 的 {errors:[{message}]}
+function apiErrMsg(d,status){
+  if(d&&d.error)return d.error;
+  if(d&&d.errors&&d.errors.length&&d.errors[0].message)
+    return d.errors[0].message+(d.errors[0].parameter?(' (参数 '+d.errors[0].parameter+')'):'');
+  return 'HTTP '+status;
+}
+
 function render(res,ms,url,q,lang){
   var sb=$('#statusbar');
   $('#requrl').style.display='block';
@@ -214,21 +253,38 @@ function render(res,ms,url,q,lang){
   if(!res.ok){
     sb.style.display='flex';
     sb.innerHTML='<span style="color:var(--err)">HTTP '+res.status+'</span>';
-    showNotice('err',(res.d&&res.d.error)||('HTTP '+res.status));
+    showNotice('err',apiErrMsg(res.d,res.status));
     $('#resultCard').style.display='none';
     return;
   }
   var d=res.d;LAST={d:d,url:url,q:q};
   sb.style.display='flex';
-  var langTxt=d.language||'auto';
-  sb.innerHTML='<span><span class="dot"></span>完成</span>'+
+
+  var items=[],suggestions=[],langTxt,total=null;
+  if(MODE==='bing'){
+    // v7 响应:webPages.value / relatedSearches.value
+    var wp=d.webPages||{};
+    items=(wp.value||[]).map(function(it,i){
+      return {position:i+1,title:it.name,url:it.url,content:it.snippet};
+    });
+    suggestions=((d.relatedSearches||{}).value||[]).map(function(x){return x.displayText||x.text});
+    langTxt=$('#lang').value; // v7 响应无 language 字段,展示所选 mkt
+    total=(wp.totalEstimatedMatches!==undefined)?wp.totalEstimatedMatches:null;
+  }else{
+    items=d.results||[];
+    suggestions=d.suggestions||[];
+    langTxt=d.language||'auto';
+  }
+  var sbHtml='<span><span class="dot"></span>完成</span>'+
     '<span class="kv">耗时 <b>'+ms+' ms</b></span>'+
-    '<span class="kv">结果 <b>'+d.number_of_results+'</b> 条</span>'+
-    '<span class="kv">语言 <b>'+langTxt+'</b></span>'+
+    '<span class="kv">结果 <b>'+items.length+'</b> 条</span>';
+  if(total!==null)sbHtml+='<span class="kv">总数≈ <b>'+total+'</b></span>';
+  sbHtml+='<span class="kv">'+(MODE==='bing'?'mkt':'语言')+' <b>'+langTxt+'</b></span>'+
     '<span class="kv">引擎 <b>bing</b></span>';
+  sb.innerHTML=sbHtml;
 
   var box=$('#results');box.innerHTML='';
-  (d.results||[]).forEach(function(r){
+  items.forEach(function(r){
     var div=document.createElement('div');div.className='result';
     var host='';try{host=new URL(r.url).hostname}catch(e){}
     var a=document.createElement('a');a.className='rtitle';a.href=r.url;a.target='_blank';a.rel='noopener';
@@ -243,12 +299,12 @@ function render(res,ms,url,q,lang){
   });
 
   var rel=$('#rel');
-  if(d.suggestions&&d.suggestions.length){
+  if(suggestions.length){
     rel.style.display='block';
     var ch=$('#chips');ch.innerHTML='';
-    d.suggestions.forEach(function(s){
+    suggestions.forEach(function(s){
       var c=document.createElement('button');c.className='chip';c.textContent=s;
-      c.onclick=function(){$('#q').value=s;doSearch(1);window.scrollTo({top:0,behavior:'smooth'})};
+      c.onclick=function(){$('#q').value=s;doSearchReset();window.scrollTo({top:0,behavior:'smooth'})};
       ch.appendChild(c);
     });
   }else{rel.style.display='none'}
@@ -256,16 +312,28 @@ function render(res,ms,url,q,lang){
   $('#resultCard').style.display='block';
   $('#raw').textContent=JSON.stringify(d,null,2);
   $('#curl').textContent='curl "'+location.origin+url+'"';
-  $('#prev').disabled=($('#page').value|0)<=1;
-  $('#next').disabled=(d.results||[]).length===0;
-  if((d.results||[]).length===0){
-    showNotice('info','Bing 未返回结果(可能触发风控/语言过滤),可换关键词或 language=all 重试');
+  $('#prev').disabled=(($('#page').value|0))<=(MODE==='bing'?0:1);
+  $('#next').disabled=items.length===0;
+  if(items.length===0){
+    showNotice('info',MODE==='bing'
+      ?'Bing 未返回结果(可能 offset 超出范围/触发风控),可减小 offset 或换关键词重试'
+      :'Bing 未返回结果(可能触发风控/语言过滤),可换关键词或 language=all 重试');
   }
 }
 
 function pageStep(n){
-  var cur=$('#page').value|0;var next=cur+n;
-  if(next<1)return;doSearch(next);
+  var cur=$('#page').value|0;
+  if(MODE==='bing'){
+    // v7 模式:offset 按每页条数步进
+    var step=(($('#count').value|0)||10);
+    var next=cur+n*step;
+    if(next<0)next=0;
+    doSearch(next);
+  }else{
+    var nextp=cur+n;
+    if(nextp<1)return;
+    doSearch(nextp);
+  }
 }
 
 function copyCurl(btn){

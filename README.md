@@ -1,27 +1,56 @@
 # bing-search-api
 
-用 Go 编写的极简 SearXNG 风格搜索 API:**只搜索 Bing**,拿到结果后**不做任何重新排序、去重或聚合**,按 Bing 结果页的原始顺序整理成 JSON 返回。支持**全量语言筛选**,`language` 参数用法与 SearXNG 一致。
+用 Go 编写的极简搜索 API:**只搜索 Bing**,拿到结果后**不做任何重新排序、去重或聚合**,按 Bing 结果页的原始顺序整理成 JSON 返回。同时提供两套调用接口:
 
-适合需要自建轻量搜索代理、给小工具/脚本/前端提供搜索能力的场景。
+- **`/search`** — SearXNG 风格 JSON,`language` 参数用法与 SearXNG 一致
+- **`/v7/search`** — **全面兼容微软官方 Bing Web Search API(v7) 调用协议**:官方参数、官方响应结构、官方错误格式、`Ocp-Apim-Subscription-Key` 鉴权头,存量代码改个 base URL 即可继续工作
+
+适合需要自建轻量搜索代理、给小工具/脚本/前端提供搜索能力的场景,也适合承接官方 Bing Search API 退役(2025-08-31)后的迁移需求。
 
 ![测试界面](docs/test-ui.png)
+
+![测试界面 · Bing 官方 API v7 兼容模式](docs/test-ui-v7.png)
 
 ## 特性
 
 - 单一引擎:Bing(网页结果)
 - 原样返回:结果顺序与 Bing 完全一致,不重排、不去重、不打分
 - SearXNG 风格的 JSON 响应结构,方便从 SearXNG 平滑迁移
+- **Bing 官方 API v7 调用兼容**(`/v7/search`):q/count/offset/mkt/setLang/safeSearch/responseFilter 全套官方参数,`SearchResponse` 官方响应结构,官方 `ErrorResponse` 错误格式,可选 `Ocp-Apim-Subscription-Key` 密钥鉴权,覆盖官方两代路径(`/v7/search`、`/bing/v7.0/search` 等 4 个别名)
 - **全量语言支持:70 种语言 / 99 个市场**,通过 `language` 参数筛选,行为与 SearXNG 相同
-- **Web 测试界面**:浏览器打开 `/` 即可搜索,语言/分页可选,实时查看 JSON 与 curl 命令
+- **Web 测试界面**:浏览器打开 `/` 即可搜索,接口模式(SearXNG / 官方 v7)/语言/分页/safeSearch 可选,实时查看 JSON 与 curl 命令
 - **一键安装为 systemd 服务**:`sudo bing-search-api install` 自动注册服务 + 开机自启 + 崩溃自动重启(**仅限本机 CLI,Web 端不提供任何安装入口**)
 - **帮助文档**:`bing-search-api help`(终端)与 `/help`(网页)
 - `GET /languages` 枚举全部可用语言/市场
 - 未指定语言时自动使用请求的 `Accept-Language` 头
 - 自动还原 Bing `/ck/a` 重定向为真实 URL
-- 支持 GET / POST(表单与 JSON)、分页、每页条数
+- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取)
 - 零第三方依赖,仅 Go 标准库,单二进制部署
 - 提供全平台发行版(Linux / macOS / Windows × amd64 / arm64 / 386)与 Dockerfile
-- 单元测试覆盖解析、语言解析、重定向解码
+- 单元测试 18 项:解析、语言解析、重定向解码、v7 参数校验/响应组装/错误格式
+
+## 从官方 Bing Web Search API 迁移(v7 兼容)
+
+微软已于 **2025-08-31 退役官方 Bing Search API(v7)**。如果你的代码(Azure SDK、教程、脚本、第三方库)还在按官方协议调用,把 base URL 换成本服务即可:
+
+```diff
+- https://api.bing.microsoft.com/v7/search
+- https://api.cognitive.microsoft.com/bing/v7.0/search
++ http://your-server:8080/v7/search          # 或任一等价别名
+```
+
+兼容性清单:
+
+| 官方要素 | 本服务行为 |
+| -------- | ---------- |
+| 参数 `q / count / offset / mkt / setLang / safeSearch / responseFilter` | 完全支持,校验规则同官方(count 1~50、offset 0~9000、safeSearch 三档) |
+| 参数 `freshness / textDecorations / textFormat / enableEntities …` | 接受但忽略(直接报错会破坏存量客户端) |
+| 鉴权头 `Ocp-Apim-Subscription-Key` | 可选:设 `BING_API_KEY` 环境变量后启用校验(401 返回官方格式);不设则开放 |
+| 响应 `SearchResponse`: `queryContext` / `webPages` / `relatedSearches` | 结构与字段名逐一对齐,含 `webSearchUrl`、`totalEstimatedMatches`、`value[].id/name/url/displayUrl/snippet/…` |
+| 响应 `ErrorResponse`: `errors[].code/subCode/message/parameter` | 完全一致(400 参数错误、401 密钥错误、502 上游失败) |
+| 路径 `/v7/search` 与 `/bing/v7.0/search` | 4 个等价别名全覆盖 |
+
+兼容边界(诚实声明):仅实现网页类答案(webPages + relatedSearches);`totalEstimatedMatches` 取自 SERP 计数条,解析不到时以已知结果数兜底;`setLang` 接受但按官方语义不影响结果。
 
 ## 快速开始
 
@@ -37,8 +66,8 @@
 
 ```bash
 sha256sum -c SHA256SUMS                # 校验完整性
-tar xzf bing-search-api_v1.1.1_linux_amd64.tar.gz
-cd bing-search-api_v1.1.1_linux_amd64
+tar xzf bing-search-api_v1.2.0_linux_amd64.tar.gz
+cd bing-search-api_v1.2.0_linux_amd64
 ./bing-search-api -port 9000           # 直接运行,指定端口
 sudo ./bing-search-api install -port 9000   # 或安装为 systemd 服务(开机自启)
 ```
@@ -104,12 +133,14 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api
 
 | 路径 | 说明 |
 | ---- | ---- |
-| `/` | 测试界面:搜索框 + 语言下拉(全部 99 个市场,自动跟随浏览器语言)+ 分页,实时展示结果、相关搜索、原始 JSON 与可复制的 curl 命令(curl 访问 `/` 仍返回 JSON 服务信息,两种视图互不干扰) |
-| `/help` | 帮助文档页:快速开始、API 参数、语言规则、systemd 管理命令、安全设计 |
+| `/` | 测试界面:搜索框 + 接口模式切换(SearXNG `/search` / 官方 v7 `/v7/search`,mkt、safeSearch、offset 自适应)+ 语言下拉(全部 99 个市场,自动跟随浏览器语言)+ 分页,实时展示结果、相关搜索、原始 JSON 与可复制的 curl 命令(curl 访问 `/` 仍返回 JSON 服务信息,两种视图互不干扰) |
+| `/help` | 帮助文档页:快速开始、两套 API 参数、语言规则、systemd 管理命令、安全设计 |
 
 > v1.1.0 曾提供过 `/install` 网页安装向导,v1.1.1 出于安全考虑已全部移除,安装仅限本机 CLI。
 
 ![帮助文档](docs/help-page.png)
+
+![帮助文档 · v7 兼容专节](docs/help-page-v7.png)
 
 ## API
 
@@ -139,6 +170,76 @@ curl -X POST http://localhost:8080/search \
 
 curl -X POST http://localhost:8080/search -d "q=golang&page=2&language=de"
 ```
+
+### GET|POST /v7/search(Bing 官方 API v7 兼容)
+
+请求参数与官方 Bing Web Search API(v7)一致:
+
+| 参数 | 必填 | 默认 | 说明 |
+| ---- | ---- | ---- | ---- |
+| q | 是 | - | 查询词(POST 可用 JSON body 传,优先级高于查询串) |
+| count | 否 | 10 | 返回条数 1~50,不足时自动多页聚合(最多 6 次抓取) |
+| offset | 否 | 0 | 0 基结果偏移,0~9000(官方语义,与 `/search` 的 page 不同) |
+| mkt | 否 | 自动 | 市场,如 `en-US`、`zh-CN`;非法值返回官方 400 格式 |
+| safeSearch | 否 | Moderate | `Off` / `Moderate` / `Strict`;Strict 映射 Bing `adlt=strict` |
+| responseFilter | 否 | - | 答案类型过滤,支持 `Webpages`、`RelatedSearches`(逗号分隔) |
+| setLang | 否 | - | 接受但忽略(官方语义仅影响界面字符串) |
+
+```bash
+curl "http://localhost:8080/v7/search?q=golang&count=25&offset=50&mkt=en-US"
+
+curl -X POST http://localhost:8080/v7/search \
+     -H "Content-Type: application/json" \
+     -d '{"q":"openai","count":30,"offset":0,"mkt":"en-US","safeSearch":"Strict"}'
+
+# 带密钥(BING_API_KEY=xxx 时启用校验)
+curl "http://localhost:8080/v7/search?q=golang" -H "Ocp-Apim-Subscription-Key: xxx"
+```
+
+响应为官方 `SearchResponse` 结构:
+
+```json
+{
+  "_type": "SearchResponse",
+  "queryContext": {"originalQuery": "golang", "adultIntent": false},
+  "webPages": {
+    "webSearchUrl": "https://www.bing.com/search?q=golang&mkt=en-US",
+    "totalEstimatedMatches": 7140000,
+    "value": [
+      {
+        "id": "https://api.bing.microsoft.com/api/v7/#WebPages.0",
+        "name": "The Go Programming Language",
+        "url": "https://go.dev/",
+        "displayUrl": "https://go.dev/",
+        "snippet": "Get Started Playground Tour ...",
+        "language": "en-US",
+        "isFamilyFriendly": true,
+        "isNavigational": false
+      }
+    ]
+  },
+  "relatedSearches": {
+    "id": "https://api.bing.microsoft.com/api/v7/#RelatedSearches",
+    "value": [{"text": "golang tutorial", "displayText": "golang tutorial", "webSearchUrl": "..."}]
+  }
+}
+```
+
+错误为官方 `ErrorResponse` 结构:
+
+| 状态码 | 场景 | 官方错误码 |
+| ------ | ---- | ---------- |
+| 400 | 缺 q / 参数非法 / mkt 不支持 | `InvalidRequest` + `ParameterMissing`/`ParameterInvalid` |
+| 401 | `BING_API_KEY` 已设但密钥不匹配 | `UnauthorizedAccess` |
+| 405 | 方法不支持 | `InvalidRequest` |
+| 502 | Bing 抓取失败/被限流 | `ServerError` + `UnexpectedError` |
+
+```json
+{"_type":"ErrorResponse","errors":[{"code":"InvalidRequest","subCode":"ParameterInvalid",
+  "message":"count 必须是 1~50 的整数","parameter":"count","value":"99"}]}
+```
+
+等价别名(覆盖官方两代路径):`/v7.0/search`、`/bing/v7/search`、`/bing/v7.0/search`。
 
 ## 语言支持(与 SearXNG 相同)
 
@@ -224,6 +325,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 
 ### 其他端点
 
+- `GET /v7/search` Bing 官方 API v7 兼容(见上节,含 4 个路径别名)
 - `GET /languages` 全部支持的语言/市场列表
 - `GET /help` 帮助文档页(浏览器打开)
 - `GET /healthz` 健康检查
@@ -243,6 +345,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | `PORT` | `8080` | 监听端口(命令行 `-port` 优先) |
 | `HOST` | `0.0.0.0` | 监听地址(命令行 `-host` 优先) |
 | `BING_BASE` | `https://www.bing.com` | Bing 入口,可换成 `https://cn.bing.com` |
+| `BING_API_KEY` | 空 | 设置后 `/v7/*` 要求 `Ocp-Apim-Subscription-Key` 头(或 `subscription-key` 参数)与之匹配;不设则开放访问 |
 
 ## 与 SearXNG 的关系
 
@@ -257,8 +360,9 @@ curl http://localhost:8080/languages | python3 -m json.tool
 
 - 通过解析 Bing 结果页 HTML 实现,页面结构变化时需要更新 `bing.go` 中的正则
 - `language` 映射到 Bing 的 `mkt`/`setlang`,是强提示但非强制:Bing 还会结合出口 IP 的地理定位与查询词本身判断市场,数据中心 IP 上个别查询可能被地理定位干扰(换部署位置或配 `BING_BASE` 可缓解)
-- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率
-- 仅供学习与个人使用,请遵守 Bing 的服务条款;生产环境建议使用官方 Bing Web Search API
+- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页
+- v7 兼容层只实现网页类答案(webPages + relatedSearches),`responseFilter` 指定其他答案类型时按官方"过滤后为空"语义返回;`totalEstimatedMatches` 是 SERP 计数条上的估计值
+- 仅供学习与个人使用,请遵守 Bing 的服务条款;本服务不是官方 Bing API 的替代品,不提供官方 SLA 与配额语义
 
 ## 开发
 
@@ -275,14 +379,16 @@ make dist      # 交叉编译全平台发行包到 dist/
 
 ```
 ├── main.go                 # CLI 入口(子命令/双顺序 flag 解析)与 HTTP 服务:路由、参数、中间件
-├── bing.go                 # Bing 抓取与解析(结果、重定向解码、相关搜索)
+├── bing.go                 # Bing 抓取与解析(结果、重定向解码、相关搜索、多页聚合、SERP 总数)
+├── bingapi.go              # Bing 官方 API v7 兼容层(参数校验、官方响应/错误结构、密钥鉴权)
 ├── languages.go            # 全量语言/市场表与语言参数解析(SearXNG 兼容)
 ├── install.go              # systemd 安装/卸载(仅限本机 CLI,自动 sudo 提权;沙箱加固单元)
 ├── web.go                  # Web 路由:/ /help(HTML/JSON 内容协商)
-├── pages.go                # 测试界面(内联 HTML/CSS/JS,无外部资源)
+├── pages.go                # 测试界面(内联 HTML/CSS/JS,双接口模式,无外部资源)
 ├── pages_help.go           # 帮助页(内联 HTML)
 ├── types.go                # JSON 响应结构定义
-├── bing_test.go            # 单元测试
+├── bing_test.go            # 单元测试(解析/语言/重定向)
+├── bingapi_test.go         # v7 兼容层单元测试(参数/响应/错误/总数)
 ├── docs/                   # 界面截图
 ├── build_release.sh        # 全平台交叉编译打包脚本
 ├── Makefile

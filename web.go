@@ -2,8 +2,8 @@ package main
 
 // web.go Web 界面路由:
 //
-//	GET  /       测试界面(浏览器);curl 或 Accept: application/json 时返回服务信息 JSON
-//	GET  /help   帮助文档页(端点/参数/CLI/systemd 管理说明)
+//      GET  /       测试界面(浏览器);curl 或 Accept: application/json 时返回服务信息 JSON
+//      GET  /help   帮助文档页(端点/参数/CLI/systemd 管理说明)
 //
 // 安全设计:安装/卸载只提供本机 CLI(sudo bing-search-api install),
 // 不设任何 Web 端安装入口——HTTP 端口无鉴权,不能暴露系统写权限。
@@ -12,6 +12,7 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -82,18 +83,21 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"name":        "bing-search-api",
 			"version":     version,
-			"description": "SearXNG 风格的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
+			"description": "SearXNG 风格 + Bing 官方 API v7 兼容的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
 			"engine":      "bing",
 			"languages":   len(languages),
 			"ui":          "/          (浏览器打开即测试界面)",
 			"endpoints": map[string]string{
-				"GET|POST /search": "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
-				"GET /languages":   "全部支持的语言/市场列表",
-				"GET /help":        "帮助文档(浏览器打开)",
-				"GET /healthz":     "健康检查",
-				"CLI":              "help | install(仅本机) | uninstall | version | -port N | -host IP",
+				"GET|POST /search":    "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
+				"GET|POST /v7/search": "Bing 官方 Search API v7 调用兼容(官方退役 API 的直接替换):q、count、offset、mkt、setLang、safeSearch、responseFilter;别名 /v7.0/search、/bing/v7(.0)/search",
+				"GET /languages":      "全部支持的语言/市场列表",
+				"GET /help":           "帮助文档(浏览器打开)",
+				"GET /healthz":        "健康检查",
+				"CLI":                 "help | install(仅本机) | uninstall | version | -port N | -host IP",
 			},
-			"example": "/search?q=golang&count=10&page=1&language=zh-CN",
+			"example":      "/search?q=golang&count=10&page=1&language=zh-CN",
+			"example_v7":   "/v7/search?q=golang&count=10&offset=0&mkt=en-US",
+			"bing_api_key": os.Getenv("BING_API_KEY") != "",
 		})
 		return
 	}

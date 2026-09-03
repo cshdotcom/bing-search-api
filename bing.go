@@ -27,10 +27,11 @@ const (
 
 // QueryParams 一次 Bing 查询的参数
 type QueryParams struct {
-	Term     string // 查询词
-	Count    int    // 每页条数
-	First    int    // Bing 的 first 偏移(第一条结果的全局序号,从 1 开始)
-	Language string // mkt 市场,如 zh-CN / en-US,可为空
+	Term       string // 查询词
+	Count      int    // 每页条数
+	First      int    // Bing 的 first 偏移(第一条结果的全局序号,从 1 开始)
+	Language   string // mkt 市场,如 zh-CN / en-US,可为空
+	SafeStrict bool   // safeSearch=Strict → SERP 追加 adlt=strict
 }
 
 // BingEngine 封装对 Bing 的抓取与解析
@@ -60,6 +61,8 @@ var (
 	reInlineTag = regexp.MustCompile(`(?i)</?(?:strong|em|b|i|u|span|cite|sup|sub|wbr)\b[^>]*>`)
 	// 压缩空白
 	reSpaces = regexp.MustCompile(`\s+`)
+	// SERP 计数条("约 7,140,000 条结果" / "2.340.000 Ergebnisse")
+	reSBCount = regexp.MustCompile(`(?is)<span[^>]*class="[^"]*\bsb_count\b[^"]*"[^>]*>(.*?)</span>`)
 )
 
 // Search 执行一次 Bing 搜索并返回 SearXNG 风格的响应。
@@ -88,6 +91,86 @@ func (e *BingEngine) Search(ctx context.Context, qp QueryParams) (*SearchRespons
 	}, nil
 }
 
+// PagedQuery 官方 API v7 兼容层的分页聚合查询
+// (offset/count 语义 → Bing SERP 的 first 多页抓取)
+type PagedQuery struct {
+	Term       string // 查询词
+	Language   string // mkt 市场,可为空
+	Offset     int    // 0 基偏移(v7 offset 语义)
+	Count      int    // 期望返回条数,1~50
+	SafeStrict bool   // safeSearch=Strict
+}
+
+// maxFetchPages 多页聚合的最大抓取次数(count≤50,每页约 10 条,6 页足够;
+// 同时这也是防止 Bing 风控的硬上限)
+const maxFetchPages = 6
+
+// SearchPaged 从 offset 起聚合 count 条结果:跨 SERP 多页抓取、去重、
+// 截断,同时返回相关搜索与 SERP 计数条上的估计总数(解析不到为 0)。
+func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, []string, int64, error) {
+	want := pq.Count
+	if want < 1 {
+		want = 10
+	}
+	if want > 50 {
+		want = 50
+	}
+
+	var (
+		results     []Result
+		suggestions []string
+		total       int64
+		seen        = map[string]bool{}
+	)
+	// v7 的 offset 是 0 基全局序号;Bing SERP 的 first 是 1 基
+	first := pq.Offset + 1
+
+	for page := 0; page < maxFetchPages && len(results) < want; page++ {
+		body, err := e.fetch(ctx, QueryParams{
+			Term:       pq.Term,
+			Count:      want,
+			First:      first,
+			Language:   pq.Language,
+			SafeStrict: pq.SafeStrict,
+		})
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		pageResults, pageSugg := parseBing(string(body))
+		if total == 0 {
+			total = parseTotalResults(string(body))
+		}
+		if len(suggestions) == 0 {
+			suggestions = pageSugg
+		}
+		if len(pageResults) == 0 {
+			break // SERP 无更多结果
+		}
+		added := 0
+		for _, res := range pageResults {
+			if res.URL == "" || seen[res.URL] {
+				continue // 跨页去重(Bing 偶尔重复展示)
+			}
+			seen[res.URL] = true
+			res.Position = len(results) + 1
+			results = append(results, res)
+			added++
+			if len(results) >= want {
+				break
+			}
+		}
+		if added == 0 {
+			break // 整页都是重复项,继续翻页无意义
+		}
+		// 下一页从本页实际返回的末尾继续
+		first += len(pageResults)
+	}
+	if len(results) > want {
+		results = results[:want]
+	}
+	return results, suggestions, total, nil
+}
+
 // fetch 请求 Bing 搜索页并返回 HTML(最多 5MB)
 func (e *BingEngine) fetch(ctx context.Context, qp QueryParams) ([]byte, error) {
 	u, err := url.Parse(e.Base)
@@ -103,6 +186,10 @@ func (e *BingEngine) fetch(ctx context.Context, qp QueryParams) ([]byte, error) 
 	if qp.Language != "" {
 		params.Set("mkt", qp.Language)
 		params.Set("setlang", strings.ToLower(strings.SplitN(qp.Language, "-", 2)[0]))
+	}
+	if qp.SafeStrict {
+		// Bing SERP 的严格安全搜索开关
+		params.Set("adlt", "strict")
 	}
 	u.RawQuery = params.Encode()
 
@@ -210,6 +297,40 @@ func decodeBingRedirect(href string) string {
 		return s
 	}
 	return href
+}
+
+// parseTotalResults 从 SERP 计数条提取总结果数(如 "约 1,000 条结果" → 1000)。
+// 各地区千分位分隔符不同(逗号/点),先移除分隔符再取最长数字串;
+// 无法解析时返回 0,由调用方兜底。
+func parseTotalResults(page string) int64 {
+	m := reSBCount.FindStringSubmatch(page)
+	if m == nil {
+		return 0
+	}
+	text := cleanText(m[1])
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case ',', '.', '\u00a0', '\u2019', ' ': // 千分位分隔与不可见空白
+			return -1
+		}
+		return r
+	}, text)
+	var best string
+	for _, seg := range strings.FieldsFunc(text, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) {
+		if len(seg) > len(best) {
+			best = seg
+		}
+	}
+	if best == "" || len(best) > 15 { // 防御异常超长数字
+		return 0
+	}
+	n, err := strconv.ParseInt(best, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // cleanText 去掉 HTML 标签、还原实体、压缩空白

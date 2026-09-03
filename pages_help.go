@@ -54,7 +54,7 @@ footer{margin-top:26px;text-align:center;font-size:12.5px;color:var(--dim)}
 
 <div class="card">
 <h1>帮助文档</h1>
-<p class="lead">SearXNG 风格的极简搜索服务:只搜 Bing,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选,行为与 SearXNG 一致。</p>
+<p class="lead">SearXNG 风格 + Bing 官方 API v7 调用兼容的极简搜索服务:只搜 Bing,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选。</p>
 </div>
 
 <div class="card">
@@ -91,7 +91,8 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api</code></pre></td><
 <table>
 <tr><th>端点</th><th>方法</th><th>说明</th></tr>
 <tr><td><code>/</code></td><td>GET</td><td>浏览器打开 → 测试界面;curl → 服务信息 JSON</td></tr>
-<tr><td><code>/search</code></td><td>GET/POST</td><td>搜索,参数见下表</td></tr>
+<tr><td><code>/search</code></td><td>GET/POST</td><td>SearXNG 风格搜索,参数见下表</td></tr>
+<tr><td><code>/v7/search</code></td><td>GET/POST</td><td><b>Bing 官方 Search API v7 调用兼容</b>(见下方专节)</td></tr>
 <tr><td><code>/languages</code></td><td>GET</td><td>全部支持的语言/市场列表(JSON)</td></tr>
 <tr><td><code>/help</code></td><td>GET</td><td>本帮助页</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>健康检查</td></tr>
@@ -110,6 +111,37 @@ curl -X POST http://localhost:__PORT__/search \
      -H "Content-Type: application/json" \
      -d '{"q":"openai","count":5,"page":2,"language":"en-US"}'</code></pre>
 <p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持,405 方法错误,502 Bing 抓取失败,响应均为 JSON。</p>
+</div>
+
+<div class="card">
+<h2>Bing 官方 API v7 兼容(/v7/search)</h2>
+<p>微软已于 2025-08-31 退役官方 Bing Search API(v7)。本端点把官方调用协议原样接住——请求参数、响应 JSON 结构、错误格式、鉴权头均与官方一致,<b>存量代码只需把 base URL 换成本服务地址即可继续工作</b>:</p>
+<pre><code># 官方退役前的调用
+GET https://api.bing.microsoft.com/v7/search?q=golang&mkt=en-US \
+    -H "Ocp-Apim-Subscription-Key: &lt;your-key&gt;"
+
+# 改成自己的服务(零改造迁移)
+GET http://localhost:__PORT__/v7/search?q=golang&mkt=en-US</code></pre>
+<table>
+<tr><th>参数</th><th>必填</th><th>默认</th><th>说明</th></tr>
+<tr><td><code>q</code></td><td>是</td><td>-</td><td>查询词</td></tr>
+<tr><td><code>count</code></td><td>否</td><td>10</td><td>返回条数 1~50,不足时自动多页聚合</td></tr>
+<tr><td><code>offset</code></td><td>否</td><td>0</td><td>0 基偏移(官方语义,与 page 不同)</td></tr>
+<tr><td><code>mkt</code></td><td>否</td><td>自动</td><td>市场,如 <code>en-US</code>、<code>zh-CN</code>(即 <code>/search</code> 的 language)</td></tr>
+<tr><td><code>safeSearch</code></td><td>否</td><td>Moderate</td><td><code>Off</code> / <code>Moderate</code> / <code>Strict</code>(Strict 映射 Bing adlt=strict)</td></tr>
+<tr><td><code>responseFilter</code></td><td>否</td><td>-</td><td>答案类型过滤,支持 <code>Webpages</code>、<code>RelatedSearches</code></td></tr>
+<tr><td><code>setLang</code></td><td>否</td><td>-</td><td>接受但忽略(官方语义仅影响界面字符串)</td></tr>
+</table>
+<p>等价别名(覆盖官方两代路径):<code>/v7.0/search</code> · <code>/bing/v7/search</code> · <code>/bing/v7.0/search</code>。</p>
+<p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。</p>
+<p><b>可选鉴权</b>:设环境变量 <code>BING_API_KEY</code> 后,请求须携带一致的 <code>Ocp-Apim-Subscription-Key</code> 头(或 <code>subscription-key</code> 参数),否则返回官方 401 格式;未设则开放访问。</p>
+<pre><code>curl "http://localhost:__PORT__/v7/search?q=golang&count=25&offset=50&mkt=en-US"
+
+curl -X POST http://localhost:__PORT__/v7/search \
+     -H "Content-Type: application/json" \
+     -H "Ocp-Apim-Subscription-Key: $BING_API_KEY" \
+     -d '{"q":"openai","count":30,"offset":0,"mkt":"en-US","safeSearch":"Strict"}'</code></pre>
+<p style="color:var(--dim);font-size:13.5px">兼容边界:仅实现 webPages/relatedSearches 两类答案;freshness 等参数接受但忽略;totalEstimatedMatches 取自 SERP 计数条,解析不到时以已知结果数兜底。</p>
 </div>
 
 <div class="card">

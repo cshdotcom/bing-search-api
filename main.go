@@ -12,11 +12,16 @@ package main
 //   version             打印版本号
 //
 // 端点:
-//   GET|POST /search    搜索(q 必填;count/page/language 可选)
+//   GET|POST /search         搜索(q 必填;count/page/language 可选)
+//   GET|POST /v7/search       Bing 官方 Search API v7 调用兼容(q/count/offset/mkt/safeSearch…)
+//                             (别名 /v7.0/search、/bing/v7/search、/bing/v7.0/search)
 //   GET      /languages 全部支持的语言/市场列表
 //   GET      /help      帮助文档页
 //   GET      /healthz   健康检查
 //   GET      /          测试界面(浏览器)/ 服务信息 JSON(curl)
+//
+// 可选鉴权:设 BING_API_KEY 环境变量后,/v7/* 需要
+// Ocp-Apim-Subscription-Key 头(或 subscription-key 参数)与之匹配。
 //
 // 安全:安装/卸载仅限本机 CLI(sudo bing-search-api install),
 // 不提供任何 Web 端安装入口。
@@ -193,6 +198,9 @@ Web 界面(服务启动后浏览器访问):
 
 API:
   GET|POST /search    搜索:q(必填)、count、page(兼容 pageno)、language(zh-CN/ja-JP/…/all)
+  GET|POST /v7/search Bing 官方 Search API v7 兼容:q、count、offset、mkt、safeSearch
+                       (官方 API 已退役,存量代码改 base URL 即可继续用;
+                        设 BING_API_KEY 后需 Ocp-Apim-Subscription-Key 头)
   GET      /languages 全部 %d 个语言/市场
   GET      /healthz   健康检查
   https://github.com/cshdotcom/bing-search-api
@@ -222,6 +230,12 @@ func serve(port, host, bingBase string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search", srv.handleSearch)
+	// Bing 官方 Search API v7 调用兼容层:覆盖官方两代路径 + 常见变体
+	v7Search := http.HandlerFunc(srv.handleBingV7Search)
+	mux.HandleFunc("/v7/search", v7Search)
+	mux.HandleFunc("/v7.0/search", v7Search)
+	mux.HandleFunc("/bing/v7/search", v7Search)
+	mux.HandleFunc("/bing/v7.0/search", v7Search)
 	mux.HandleFunc("/languages", srv.handleLanguages)
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/help", srv.handleHelpPage)
@@ -233,12 +247,15 @@ func serve(port, host, bingBase string) {
 		Handler:           withRecover(withCORS(withLog(mux))),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       20 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      60 * time.Second, // v7 大 count 需多页聚合,放宽
 	}
 
 	go func() {
 		log.Printf("bing-search-api %s 已启动: http://localhost:%s/ (测试界面)", version, portN)
-		log.Printf("帮助文档: /help   API: /search   语言: /languages (Bing: %s)", bingBase)
+		log.Printf("帮助文档: /help   API: /search + /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+		if os.Getenv("BING_API_KEY") != "" {
+			log.Printf("v7 兼容端点已启用密钥鉴权(BING_API_KEY 已设置)")
+		}
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("服务启动失败: %v", err)
 		}
@@ -424,12 +441,13 @@ func withLog(next http.Handler) http.Handler {
 	})
 }
 
-// withCORS 开放跨域,方便浏览器前端直接调用
+// withCORS 开放跨域,方便浏览器前端直接调用;
+// 放行 Ocp-Apim-Subscription-Key / X-MSEdge-ClientID 头供 v7 兼容客户端预检
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ocp-Apim-Subscription-Key, X-MSEdge-ClientID")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
