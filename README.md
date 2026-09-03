@@ -2,8 +2,8 @@
 
 用 Go 编写的极简搜索 API:**只搜索 Bing**,拿到结果后**不做任何重新排序、去重或聚合**,按 Bing 结果页的原始顺序整理成 JSON 返回。同时提供两套调用接口:
 
-- **`/search`** — SearXNG 风格 JSON,`language` 参数用法与 SearXNG 一致
-- **`/v7/search`** — **全面兼容微软官方 Bing Web Search API(v7) 调用协议**:官方参数、官方响应结构、官方错误格式、`Ocp-Apim-Subscription-Key` 鉴权头,存量代码改个 base URL 即可继续工作
+- **`/v7/search`** — **全面兼容微软官方 Bing Web Search API(v7) 调用协议**(默认启用):官方参数、官方响应结构、官方错误格式、`Ocp-Apim-Subscription-Key` 鉴权头,存量代码改个 base URL 即可继续工作
+- **`/search`** — SearXNG 风格 JSON,`language` 参数用法与 SearXNG 一致;**出于安全考虑默认禁用**,须设 `ENABLE_SEARXNG=1` 显式开启(详见下方说明)
 
 适合需要自建轻量搜索代理、给小工具/脚本/前端提供搜索能力的场景,也适合承接官方 Bing Search API 退役(2025-08-31)后的迁移需求。
 
@@ -11,12 +11,15 @@
 
 ![测试界面 · Bing 官方 API v7 兼容模式](docs/test-ui-v7.png)
 
+![测试界面 · 默认(SearXNG 禁用,自动锁定 v7 模式并提示)](docs/test-ui-v7-locked.png)
+
 ## 特性
 
 - 单一引擎:Bing(网页结果)
 - 原样返回:结果顺序与 Bing 完全一致,不重排、不去重、不打分
+- **安全默认**:SearXNG 兼容接口 `/search` 默认禁用(设 `ENABLE_SEARXNG=1` 开启),v7 兼容接口可选 `BING_API_KEY` 密钥鉴权——开箱即用时暴露面最小
 - SearXNG 风格的 JSON 响应结构,方便从 SearXNG 平滑迁移
-- **Bing 官方 API v7 调用兼容**(`/v7/search`):q/count/offset/mkt/setLang/safeSearch/responseFilter 全套官方参数,`SearchResponse` 官方响应结构,官方 `ErrorResponse` 错误格式,可选 `Ocp-Apim-Subscription-Key` 密钥鉴权,覆盖官方两代路径(`/v7/search`、`/bing/v7.0/search` 等 4 个别名)
+- **Bing 官方 API v7 调用兼容**(`/v7/search`):q/count/offset/mkt/setLang/safeSearch/responseFilter 全套官方参数,`SearchResponse` 官方响应结构,官方 `ErrorResponse` 错误格式,覆盖官方两代路径(`/v7/search`、`/bing/v7.0/search` 等 4 个别名)
 - **全量语言支持:70 种语言 / 99 个市场**,通过 `language` 参数筛选,行为与 SearXNG 相同
 - **Web 测试界面**:浏览器打开 `/` 即可搜索,接口模式(SearXNG / 官方 v7)/语言/分页/safeSearch 可选,实时查看 JSON 与 curl 命令
 - **一键安装为 systemd 服务**:`sudo bing-search-api install` 自动注册服务 + 开机自启 + 崩溃自动重启(**仅限本机 CLI,Web 端不提供任何安装入口**)
@@ -27,7 +30,7 @@
 - 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取)
 - 零第三方依赖,仅 Go 标准库,单二进制部署
 - 提供全平台发行版(Linux / macOS / Windows × amd64 / arm64 / 386)与 Dockerfile
-- 单元测试 18 项:解析、语言解析、重定向解码、v7 参数校验/响应组装/错误格式
+- 单元测试 21 项:解析、语言解析、重定向解码、v7 参数校验/响应组装/错误格式、SearXNG 开关门禁
 
 ## 从官方 Bing Web Search API 迁移(v7 兼容)
 
@@ -66,8 +69,8 @@
 
 ```bash
 sha256sum -c SHA256SUMS                # 校验完整性
-tar xzf bing-search-api_v1.2.0_linux_amd64.tar.gz
-cd bing-search-api_v1.2.0_linux_amd64
+tar xzf bing-search-api_v1.3.0_linux_amd64.tar.gz
+cd bing-search-api_v1.3.0_linux_amd64
 ./bing-search-api -port 9000           # 直接运行,指定端口
 sudo ./bing-search-api install -port 9000   # 或安装为 systemd 服务(开机自启)
 ```
@@ -133,7 +136,7 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api
 
 | 路径 | 说明 |
 | ---- | ---- |
-| `/` | 测试界面:搜索框 + 接口模式切换(SearXNG `/search` / 官方 v7 `/v7/search`,mkt、safeSearch、offset 自适应)+ 语言下拉(全部 99 个市场,自动跟随浏览器语言)+ 分页,实时展示结果、相关搜索、原始 JSON 与可复制的 curl 命令(curl 访问 `/` 仍返回 JSON 服务信息,两种视图互不干扰) |
+| `/` | 测试界面:搜索框 + 接口模式切换(SearXNG `/search` / 官方 v7 `/v7/search`,mkt、safeSearch、offset 自适应;服务端禁用 SearXNG 接口时自动锁定 v7 模式并提示)+ 语言下拉(全部 99 个市场,自动跟随浏览器语言)+ 分页,实时展示结果、相关搜索、原始 JSON 与可复制的 curl 命令(curl 访问 `/` 仍返回 JSON 服务信息,两种视图互不干扰) |
 | `/help` | 帮助文档页:快速开始、两套 API 参数、语言规则、systemd 管理命令、安全设计 |
 
 > v1.1.0 曾提供过 `/install` 网页安装向导,v1.1.1 出于安全考虑已全部移除,安装仅限本机 CLI。
@@ -144,7 +147,9 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api
 
 ## API
 
-### GET /search
+### GET /search(SearXNG 兼容,默认禁用)
+
+> ⚠️ **出于安全考虑,本接口默认关闭**:无鉴权的开放搜索代理会被陌生流量滥用——匿名白嫙你的出口 IP 抓 Bing、高频调用触发风控连坐。仅在确需 SearXNG 兼容时,设环境变量 `ENABLE_SEARXNG=1` 并重启服务开启(配置方法见下方「配置」)。未开启时调用返回 403 与开启指引;`/v7/search` 不受影响。
 
 | 参数 | 必填 | 默认 | 说明 |
 | ---- | ---- | ---- | ---- |
@@ -155,7 +160,9 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api
 | format | 否 | - | 仅为兼容 SearXNG 保留,传任何值都返回 JSON |
 
 ```bash
-curl "http://localhost:8080/search?q=golang&count=5&page=1"
+ENABLE_SEARXNG=1 ./bing-search-api     # 启动时开启(或 systemd drop-in,见配置章节)
+
+curl "http://localhost:8080/search?q=golang&count=5&page=1"      # 开启后可用
 curl "http://localhost:8080/search?q=云计算&language=zh-CN&count=10"
 ```
 
@@ -320,6 +327,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | ------ | ---- | ---- |
 | 400 | 缺少 q 参数 | `{"error":"缺少查询参数 q"}` |
 | 400 | 不支持的语言 | `{"error":"不支持的语言 \"xx\":共支持 99 个语言/市场(完整列表见 GET /languages)..."}` |
+| 403 | 未设 ENABLE_SEARXNG(默认禁用) | `{"error":"SearXNG 兼容接口已禁用(默认):如需开启,设环境变量 ENABLE_SEARXNG=1 后重启服务;..."}` |
 | 405 | 方法不支持 | `{"error":"仅支持 GET / POST"}` |
 | 502 | Bing 抓取失败/被限流 | `{"error":"Bing 查询失败: ..."}` |
 
@@ -335,7 +343,8 @@ curl http://localhost:8080/languages | python3 -m json.tool
 
 - **安装/卸载仅限本机 CLI**:必须在服务器终端执行 `sudo bing-search-api install`,sudo 密码即鉴权。HTTP 端口无鉴权,因此 Web 端**不存在任何安装入口**——无鉴权的网页安装按钮会直接变成“远程改写系统配置”的后门(v1.1.0 曾提供的 `/install` 网页向导已在 v1.1.1 移除)
 - **服务进程非特权运行**:systemd 单元默认沙箱加固——动态非特权用户(DynamicUser)、文件系统只读、禁设备/内核写入、内存 W^X,仅保留低端口绑定能力;即使服务进程被攻破也无法改动系统配置或提权。老版本 systemd(如 CentOS 7)不支持时会自动退回兼容单元
-- **搜索 API 本身是公开的**(与 SearXNG 部署形态一致):`/v7/*` 兼容端点可选启用 `BING_API_KEY` 密钥鉴权(配置方法见下方「配置」);`/search` 等端点如需限制访问,建议前置反代加 BasicAuth / IP 白名单
+- **SearXNG 兼容接口默认禁用**(v1.3.0 起):`/search` 是无鉴权开放接口,公网上任何人都可把它当匿名搜索代理滥用(白嫙出口 IP、风控连坐),因此默认返回 403,须设 `ENABLE_SEARXNG=1` 显式开启;`/v7/*` 兼容端点可选 `BING_API_KEY` 密钥鉴权(配置方法见「配置」)
+- **搜索 API 暴露面可控**:开箱即用时仅 `/v7/search`(建议配密钥)+ `/languages` + `/help` + `/healthz` 可访问;`/search` 等如需对更多人开放,建议前置反代加 BasicAuth / IP 白名单
 - 部署在公网时,请用防火墙/安全组控制暴露面,并合理限流避免 Bing 风控
 
 ## 配置
@@ -345,7 +354,30 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | `PORT` | `8080` | 监听端口(命令行 `-port` 优先) |
 | `HOST` | `0.0.0.0` | 监听地址(命令行 `-host` 优先) |
 | `BING_BASE` | `https://www.bing.com` | Bing 入口,可换成 `https://cn.bing.com` |
+| `ENABLE_SEARXNG` | 关 | **SearXNG 兼容接口 `/search` 开关**:设 `1`(或 true/yes/on)开启;不设则该接口返回 403(安全考虑,见下节) |
 | `BING_API_KEY` | 空 | 设置后 `/v7/*` 要求 `Ocp-Apim-Subscription-Key` 头(或 `subscription-key` 参数)与之匹配;不设则开放访问 |
+
+### SearXNG 兼容接口开关(ENABLE_SEARXNG,默认关)
+
+`/search` 是无鉴权的 SearXNG 风格开放接口,部署在公网时任何知道地址的人都能把你的服务当**匿名搜索代理**用:流量耗在别人身上、Bing 风控连坐到你的出口 IP。因此 v1.3.0 起**默认关闭**,仅在确需 SearXNG 兼容时显式开启:
+
+```bash
+# 1) 直接运行
+ENABLE_SEARXNG=1 ./bing-search-api
+
+# 2) systemd 服务:drop-in 追加,不改动主单元(升级服务不丢配置)
+sudo systemctl edit bing-search-api
+#   在编辑器中加入(保存退出):
+#   [Service]
+#   Environment=ENABLE_SEARXNG=1
+sudo systemctl restart bing-search-api
+journalctl -u bing-search-api -n 5    # 日志出现"SearXNG 兼容,已启用"即生效
+
+# 3) Docker
+docker run -d -p 8080:8080 -e ENABLE_SEARXNG=1 bing-search-api
+```
+
+未开启时访问 `/search` 返回 403 与开启指引;`/v7/search`、`/languages`、`/help`、`/healthz` 不受影响。公网部署建议同时设置 `BING_API_KEY`,并配合反代限制访问。
 
 ### 可选鉴权:BING_API_KEY 配置方法(v7 兼容端点)
 
@@ -429,6 +461,7 @@ make dist      # 交叉编译全平台发行包到 dist/
 ├── types.go                # JSON 响应结构定义
 ├── bing_test.go            # 单元测试(解析/语言/重定向)
 ├── bingapi_test.go         # v7 兼容层单元测试(参数/响应/错误/总数)
+├── searxng_test.go         # SearXNG 开关门禁单元测试(ENABLE_SEARXNG/403)
 ├── docs/                   # 界面截图
 ├── build_release.sh        # 全平台交叉编译打包脚本
 ├── Makefile

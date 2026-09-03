@@ -153,13 +153,14 @@ footer{margin-top:26px;font-size:12.5px;color:var(--dim);text-align:center}
   </div>
 </div>
 
-<footer>仅抓取 Bing 网页结果 · SearXNG 兼容 + Bing 官方 API v7 兼容 · 端口 __PORT__ · <a href="/help">API 文档</a></footer>
+<footer id="pageFooter">仅抓取 Bing 网页结果 · <span id="footerModes">SearXNG 兼容 + </span>Bing 官方 API v7 兼容 · 端口 __PORT__ · <a href="/help">API 文档</a></footer>
 </div>
 
 <script>
 var $=function(s){return document.querySelector(s)};
 var LANGS=null;
 var MODE='searxng'; // searxng = /search;bing = /v7/search(官方 API 兼容)
+var SEARXNG_ON=__SEARXNG__; // 服务端是否启用 SearXNG 兼容接口(默认 0)
 
 // 接口模式切换:label 与参数随模式自适应
 $('#mode').addEventListener('change',function(){
@@ -173,6 +174,16 @@ $('#mode').addEventListener('change',function(){
   pg.max=v7?'9000':'100';
   pg.value=v7?'0':'1';
 });
+
+// 服务端禁用 /search(默认)时:移除该选项、锁定 v7 模式并给出提示
+if(!SEARXNG_ON){
+  var sel=$('#mode');
+  if(sel.options[0]&&sel.options[0].value==='searxng')sel.remove(0);
+  sel.value='bing';
+  sel.dispatchEvent(new Event('change'));
+  var fm=$('#footerModes');if(fm)fm.textContent='';
+  showNotice('info','SearXNG 兼容接口已禁用(默认):设 ENABLE_SEARXNG=1 并重启服务可开启,当前使用 Bing 官方 API v7 兼容接口');
+}
 
 // 语言下拉:从 /languages 动态加载
 fetch('/languages').then(function(r){return r.json()}).then(function(d){

@@ -42,10 +42,15 @@ func writeHTML(w http.ResponseWriter, status int, body string) {
 
 // renderPage 把页面模板中的占位符替换为运行时信息
 func renderPage(tpl string) string {
+	sx := "0"
+	if searxngEnabled() {
+		sx = "1"
+	}
 	r := strings.NewReplacer(
 		"__VERSION__", version,
 		"__LANG_COUNT__", itoa(len(languages)),
 		"__PORT__", servePort,
+		"__SEARXNG__", sx,
 	)
 	return r.Replace(tpl)
 }
@@ -80,22 +85,27 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wantsJSON(r) {
+		searchDesc := "SearXNG 兼容接口【已禁用】:设 ENABLE_SEARXNG=1 后重启开启(开放代理有滥用风险,默认关闭)"
+		if searxngEnabled() {
+			searchDesc = "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"name":        "bing-search-api",
-			"version":     version,
-			"description": "SearXNG 风格 + Bing 官方 API v7 兼容的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
-			"engine":      "bing",
-			"languages":   len(languages),
-			"ui":          "/          (浏览器打开即测试界面)",
+			"name":            "bing-search-api",
+			"version":         version,
+			"description":     "SearXNG 风格 + Bing 官方 API v7 兼容的极简搜索 API:只搜 Bing,结果保持原始顺序,以 JSON 返回",
+			"engine":          "bing",
+			"languages":       len(languages),
+			"searxng_enabled": searxngEnabled(),
+			"ui":              "/          (浏览器打开即测试界面)",
 			"endpoints": map[string]string{
-				"GET|POST /search":    "q(必填)、count(默认10)、page(默认1,兼容 pageno)、language(如 zh-CN,见 /languages)",
 				"GET|POST /v7/search": "Bing 官方 Search API v7 调用兼容(官方退役 API 的直接替换):q、count、offset、mkt、setLang、safeSearch、responseFilter;别名 /v7.0/search、/bing/v7(.0)/search",
+				"GET|POST /search":    searchDesc,
 				"GET /languages":      "全部支持的语言/市场列表",
 				"GET /help":           "帮助文档(浏览器打开)",
 				"GET /healthz":        "健康检查",
 				"CLI":                 "help | install(仅本机) | uninstall | version | -port N | -host IP",
 			},
-			"example":      "/search?q=golang&count=10&page=1&language=zh-CN",
+			"example":      "/v7/search?q=golang&count=10&offset=0&mkt=en-US",
 			"example_v7":   "/v7/search?q=golang&count=10&offset=0&mkt=en-US",
 			"bing_api_key": os.Getenv("BING_API_KEY") != "",
 		})

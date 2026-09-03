@@ -54,7 +54,7 @@ footer{margin-top:26px;text-align:center;font-size:12.5px;color:var(--dim)}
 
 <div class="card">
 <h1>帮助文档</h1>
-<p class="lead">SearXNG 风格 + Bing 官方 API v7 调用兼容的极简搜索服务:只搜 Bing,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选。</p>
+<p class="lead">SearXNG 风格 + Bing 官方 API v7 调用兼容的极简搜索服务:只搜 Bing,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选。<b>SearXNG 兼容接口默认禁用</b>(设 ENABLE_SEARXNG=1 开启),默认仅开放 v7 兼容接口。</p>
 </div>
 
 <div class="card">
@@ -91,13 +91,14 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api</code></pre></td><
 <table>
 <tr><th>端点</th><th>方法</th><th>说明</th></tr>
 <tr><td><code>/</code></td><td>GET</td><td>浏览器打开 → 测试界面;curl → 服务信息 JSON</td></tr>
-<tr><td><code>/search</code></td><td>GET/POST</td><td>SearXNG 风格搜索,参数见下表</td></tr>
+<tr><td><code>/search</code></td><td>GET/POST</td><td>SearXNG 风格搜索(参数见下表)<br><span style="color:#e8b44f;font-size:12.5px">⚠ 默认禁用:设 <code>ENABLE_SEARXNG=1</code> 后重启开启</span></td></tr>
 <tr><td><code>/v7/search</code></td><td>GET/POST</td><td><b>Bing 官方 Search API v7 调用兼容</b>(见下方专节)</td></tr>
 <tr><td><code>/languages</code></td><td>GET</td><td>全部支持的语言/市场列表(JSON)</td></tr>
 <tr><td><code>/help</code></td><td>GET</td><td>本帮助页</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>健康检查</td></tr>
 </table>
-<h2 style="margin-top:18px">/search 参数</h2>
+<h2 style="margin-top:18px">/search 参数<span class="tag">默认禁用</span></h2>
+<p style="color:#e8b44f;font-size:13.5px;margin:2px 0 4px">⚠ 开放式搜索代理会被陌生流量滥用(白嫖出口 IP 抓取、触发 Bing 风控),故本接口<b>默认关闭</b>;仅在确需 SearXNG 兼容时,设环境变量 <code>ENABLE_SEARXNG=1</code> 并重启服务开启(配置方法见下方环境变量表)。</p>
 <table>
 <tr><th>参数</th><th>必填</th><th>默认</th><th>说明</th></tr>
 <tr><td><code>q</code></td><td>是</td><td>-</td><td>查询词</td></tr>
@@ -182,11 +183,32 @@ systemctl disable bing-search-api     <span style="color:#8b97a6"># 取消开机
 </div>
 
 <div class="card">
+<h2>环境变量</h2>
+<table>
+<tr><th>变量</th><th>默认</th><th>说明</th></tr>
+<tr><td><code>PORT</code></td><td>8080</td><td>监听端口(命令行 <code>-port</code> 优先)</td></tr>
+<tr><td><code>HOST</code></td><td>0.0.0.0</td><td>监听地址(命令行 <code>-host</code> 优先)</td></tr>
+<tr><td><code>BING_BASE</code></td><td>www.bing.com</td><td>Bing 入口,可换 <code>cn.bing.com</code></td></tr>
+<tr><td><code>ENABLE_SEARXNG</code></td><td>关</td><td><b>SearXNG 兼容接口 /search 开关</b>:设 <code>1</code>(或 true/yes/on)开启;不设则该接口返回 403</td></tr>
+<tr><td><code>BING_API_KEY</code></td><td>空</td><td>设置后 /v7/* 需 <code>Ocp-Apim-Subscription-Key</code> 头(或 subscription-key 参数)匹配,详见上节</td></tr>
+</table>
+<pre><code># 直接运行时开启 SearXNG 接口
+ENABLE_SEARXNG=1 ./bing-search-api
+
+# systemd 服务:drop-in 方式(升级不丢配置)
+sudo systemctl edit bing-search-api     <span style="color:#8b97a6"># 在编辑器中加入下面两行</span>
+#   [Service]
+#   Environment=ENABLE_SEARXNG=1
+sudo systemctl restart bing-search-api</code></pre>
+</div>
+
+<div class="card">
 <h2>安全设计</h2>
 <ul>
 <li><b>安装/卸载仅限本机 CLI</b>:必须在服务器终端执行 <code>sudo bing-search-api install</code>,sudo 密码即鉴权;Web 端不提供任何安装入口(HTTP 端口无鉴权,网页按钮会变成远程改配置的后门)</li>
+<li><b>SearXNG 兼容接口默认禁用</b>:无鉴权的开放搜索代理会被陌生流量滥用(匿名白嫖你的出口 IP 抓 Bing、触发风控连坐),故 <code>/search</code> 默认返回 403,须设 <code>ENABLE_SEARXNG=1</code> 显式开启;v7 兼容接口建议配 <code>BING_API_KEY</code> 使用</li>
 <li><b>服务进程非特权运行</b>:systemd 动态用户(DynamicUser) + 文件系统只读 + 禁设备/内核写入,仅保留低端口绑定能力;老版本 systemd 自动退回兼容单元</li>
-<li><b>搜索 API 本身公开</b>(与 SearXNG 部署形态一致):如需限制访问,建议前面加反代(Nginx BasicAuth / IP 白名单)</li>
+<li><b>默认最小暴露面</b>:开箱即用时仅 /v7/search(建议配密钥)+ /languages + /help + /healthz 可访问</li>
 </ul>
 </div>
 

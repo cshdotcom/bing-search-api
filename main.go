@@ -12,8 +12,9 @@ package main
 //   version             打印版本号
 //
 // 端点:
-//   GET|POST /search         搜索(q 必填;count/page/language 可选)
-//   GET|POST /v7/search       Bing 官方 Search API v7 调用兼容(q/count/offset/mkt/safeSearch…)
+//   GET|POST /search         SearXNG 兼容接口【默认禁用,设 ENABLE_SEARXNG=1 开启】
+//                             (q 必填;count/page/language 可选)
+//   GET|POST /v7/search       Bing 官方 Search API v7 调用兼容(默认启用;q/count/offset/mkt/safeSearch…)
 //                             (别名 /v7.0/search、/bing/v7/search、/bing/v7.0/search)
 //   GET      /languages 全部支持的语言/市场列表
 //   GET      /help      帮助文档页
@@ -23,8 +24,9 @@ package main
 // 可选鉴权:设 BING_API_KEY 环境变量后,/v7/* 需要
 // Ocp-Apim-Subscription-Key 头(或 subscription-key 参数)与之匹配。
 //
-// 安全:安装/卸载仅限本机 CLI(sudo bing-search-api install),
-// 不提供任何 Web 端安装入口。
+// 安全:①安装/卸载仅限本机 CLI(sudo bing-search-api install),
+// 不提供任何 Web 端安装入口;②SearXNG 兼容接口 /search 默认禁用
+// (开放代理易被滥用),须设 ENABLE_SEARXNG=1 显式开启。
 
 import (
 	"context"
@@ -56,6 +58,17 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// searxngEnabled 判断 SearXNG 兼容接口(/search)是否开启。
+// 出于安全考虑默认关闭:开放搜索代理会被陌生流量滥用(白嫖出口 IP 抓取、
+// 触发 Bing 风控),须显式设 ENABLE_SEARXNG=1/true/yes/on 才启用。
+func searxngEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ENABLE_SEARXNG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // version 由构建时通过 -ldflags 注入,如:
@@ -197,10 +210,11 @@ Web 界面(服务启动后浏览器访问):
   http://localhost:%s/help      帮助文档(端点/参数/管理命令)
 
 API:
-  GET|POST /search    搜索:q(必填)、count、page(兼容 pageno)、language(zh-CN/ja-JP/…/all)
-  GET|POST /v7/search Bing 官方 Search API v7 兼容:q、count、offset、mkt、safeSearch
+  GET|POST /v7/search Bing 官方 Search API v7 兼容(默认启用):q、count、offset、mkt、safeSearch
                        (官方 API 已退役,存量代码改 base URL 即可继续用;
                         设 BING_API_KEY 后需 Ocp-Apim-Subscription-Key 头)
+  GET|POST /search    SearXNG 兼容接口【默认禁用】:设环境变量 ENABLE_SEARXNG=1 后重启开启
+                       (q、count、page、language;开放代理有滥用风险,故默认关闭)
   GET      /languages 全部 %d 个语言/市场
   GET      /healthz   健康检查
   https://github.com/cshdotcom/bing-search-api
@@ -252,7 +266,12 @@ func serve(port, host, bingBase string) {
 
 	go func() {
 		log.Printf("bing-search-api %s 已启动: http://localhost:%s/ (测试界面)", version, portN)
-		log.Printf("帮助文档: /help   API: /search + /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+		if searxngEnabled() {
+			log.Printf("帮助文档: /help   API: /search(SearXNG 兼容,已启用) + /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+		} else {
+			log.Printf("帮助文档: /help   API: /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+			log.Printf("SearXNG 兼容接口 /search 已禁用(默认):设 ENABLE_SEARXNG=1 后重启可开启")
+		}
 		if os.Getenv("BING_API_KEY") != "" {
 			log.Printf("v7 兼容端点已启用密钥鉴权(BING_API_KEY 已设置)")
 		}
@@ -277,8 +296,15 @@ type server struct {
 	engine *BingEngine
 }
 
-// handleSearch 搜索入口,支持 GET 与 POST(表单或 JSON)
+// handleSearch 搜索入口,支持 GET 与 POST(表单或 JSON)。
+// 默认禁用:仅当环境变量 ENABLE_SEARXNG 开启时可用(见 searxngEnabled)。
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if !searxngEnabled() {
+		writeJSON(w, http.StatusForbidden, ErrorResponse{
+			Error: "SearXNG 兼容接口已禁用(默认):如需开启,设环境变量 ENABLE_SEARXNG=1 后重启服务;Bing 官方 API v7 兼容接口 /v7/search 不受影响",
+		})
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "仅支持 GET / POST"})
 		return
