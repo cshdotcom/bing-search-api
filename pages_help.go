@@ -134,7 +134,20 @@ GET http://localhost:__PORT__/v7/search?q=golang&mkt=en-US</code></pre>
 </table>
 <p>等价别名(覆盖官方两代路径):<code>/v7.0/search</code> · <code>/bing/v7/search</code> · <code>/bing/v7.0/search</code>。</p>
 <p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。</p>
-<p><b>可选鉴权</b>:设环境变量 <code>BING_API_KEY</code> 后,请求须携带一致的 <code>Ocp-Apim-Subscription-Key</code> 头(或 <code>subscription-key</code> 参数),否则返回官方 401 格式;未设则开放访问。</p>
+<p><b>可选鉴权</b>:设环境变量 <code>BING_API_KEY</code> 后,请求须携带一致的 <code>Ocp-Apim-Subscription-Key</code> 头(或 <code>subscription-key</code> 参数),否则返回官方 401 格式;未设则开放访问。密钥在服务启动时从环境变量读取,不写入配置文件,按部署方式配置:</p>
+<pre><code># 直接运行
+BING_API_KEY=你的密钥 ./bing-search-api
+
+# systemd 服务:drop-in 追加,不改动主单元(升级不丢配置)
+sudo systemctl edit bing-search-api     <span style="color:#8b97a6"># 在编辑器中加入下面两行</span>
+#   [Service]
+#   Environment=BING_API_KEY=你的密钥
+sudo systemctl restart bing-search-api
+journalctl -u bing-search-api -n 5       <span style="color:#8b97a6"># 出现"已启用密钥鉴权"即生效</span>
+
+# Docker
+docker run -d -p 8080:8080 -e BING_API_KEY=你的密钥 bing-search-api</code></pre>
+<p style="color:var(--dim);font-size:13.5px">建议用 <code>openssl rand -hex 32</code> 生成密钥;密钥经 HTTP 头明文传输,公网部署请前置反代套 HTTPS;<code>/search</code>、<code>/languages</code> 等其他端点不受鉴权影响,仍开放访问。</p>
 <pre><code>curl "http://localhost:__PORT__/v7/search?q=golang&count=25&offset=50&mkt=en-US"
 
 curl -X POST http://localhost:__PORT__/v7/search \

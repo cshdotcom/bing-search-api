@@ -335,7 +335,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 
 - **安装/卸载仅限本机 CLI**:必须在服务器终端执行 `sudo bing-search-api install`,sudo 密码即鉴权。HTTP 端口无鉴权,因此 Web 端**不存在任何安装入口**——无鉴权的网页安装按钮会直接变成“远程改写系统配置”的后门(v1.1.0 曾提供的 `/install` 网页向导已在 v1.1.1 移除)
 - **服务进程非特权运行**:systemd 单元默认沙箱加固——动态非特权用户(DynamicUser)、文件系统只读、禁设备/内核写入、内存 W^X,仅保留低端口绑定能力;即使服务进程被攻破也无法改动系统配置或提权。老版本 systemd(如 CentOS 7)不支持时会自动退回兼容单元
-- **搜索 API 本身是公开的**(与 SearXNG 部署形态一致):如需限制访问,建议前置反代加 BasicAuth / IP 白名单,而不是把鉴权逻辑埋进服务
+- **搜索 API 本身是公开的**(与 SearXNG 部署形态一致):`/v7/*` 兼容端点可选启用 `BING_API_KEY` 密钥鉴权(配置方法见下方「配置」);`/search` 等端点如需限制访问,建议前置反代加 BasicAuth / IP 白名单
 - 部署在公网时,请用防火墙/安全组控制暴露面,并合理限流避免 Bing 风控
 
 ## 配置
@@ -346,6 +346,46 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | `HOST` | `0.0.0.0` | 监听地址(命令行 `-host` 优先) |
 | `BING_BASE` | `https://www.bing.com` | Bing 入口,可换成 `https://cn.bing.com` |
 | `BING_API_KEY` | 空 | 设置后 `/v7/*` 要求 `Ocp-Apim-Subscription-Key` 头(或 `subscription-key` 参数)与之匹配;不设则开放访问 |
+
+### 可选鉴权:BING_API_KEY 配置方法(v7 兼容端点)
+
+设置 `BING_API_KEY` 环境变量后,`/v7/*` 端点要求官方 `Ocp-Apim-Subscription-Key` 鉴权;不设置则完全开放。密钥在服务**启动时从环境变量读取**,不写入任何配置文件,按部署方式选择:
+
+```bash
+# 1) 直接运行
+BING_API_KEY=你的密钥 ./bing-search-api -port 8080
+
+# 2) systemd 服务:用 drop-in 追加,不改动主单元(升级服务也不会丢配置)
+sudo systemctl edit bing-search-api
+#   在编辑器中加入(保存退出):
+#   [Service]
+#   Environment=BING_API_KEY=你的密钥
+sudo systemctl restart bing-search-api
+journalctl -u bing-search-api -n 5    # 日志出现"已启用密钥鉴权"即生效
+
+# 3) Docker
+docker run -d -p 8080:8080 -e BING_API_KEY=你的密钥 bing-search-api
+
+# 4) 从源码
+BING_API_KEY=你的密钥 go run .
+```
+
+配置生效后,客户端调用(两种方式任选,均为官方协议):
+
+```bash
+# 官方订阅密钥头(推荐)
+curl "http://localhost:8080/v7/search?q=golang" \
+     -H "Ocp-Apim-Subscription-Key: 你的密钥"
+
+# Azure APIM 查询参数方式
+curl "http://localhost:8080/v7/search?q=golang&subscription-key=你的密钥"
+```
+
+说明与建议:
+
+- 密钥错误或缺失时返回官方 401 格式(`UnauthorizedAccess`);`/search`、`/languages` 等其他端点**不受影响**,仍开放访问
+- 密钥本质是自定义口令,请用长随机串,如 `openssl rand -hex 32` 生成
+- 密钥经 HTTP 头明文传输,公网部署请在服务前置反代(Nginx/Caddy)套 HTTPS
 
 ## 与 SearXNG 的关系
 
