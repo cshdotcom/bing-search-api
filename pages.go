@@ -214,6 +214,7 @@ footer{margin-top:26px;font-size:12.5px;color:var(--dim);text-align:center}
   <div id="rel" class="rel" style="display:none"><h3>相关搜索</h3><div class="chips" id="chips"></div></div>
   <div class="pager">
     <button id="prev" onclick="pageStep(-1)">← 上一页</button>
+    <span id="pageInfo" style="color:var(--dim);font-size:13px;min-width:120px;text-align:center"></span>
     <button id="next" onclick="pageStep(1)">下一页 →</button>
   </div>
   <details class="raw"><summary>原始 JSON 响应</summary><pre id="raw"></pre></details>
@@ -315,6 +316,14 @@ fetch('/languages').then(function(r){return r.json()}).then(function(d){
 }).catch(function(){});
 
 $('#q').addEventListener('keydown',function(e){if(e.key==='Enter')doSearchReset()});
+
+// 页码/offset 输入框:回车直接跳页(之前输入页码无任何反应,翻页“看似失效”)
+$('#page').addEventListener('keydown',function(e){
+  if(e.key!=='Enter')return;
+  var v=this.value|0, min=MODE==='bing'?0:1;
+  if(v<min){v=min;this.value=min}
+  doSearch(v);
+});
 
 // 新搜索的起始点:searxng 第 1 页,bing v7 offset 0
 function doSearchReset(){doSearch(MODE==='bing'?0:1)}
@@ -460,10 +469,31 @@ function render(res,ms,url,q,lang,cat){
   curlTxt+='"'+location.origin+url+'"';
   $('#curl').textContent=curlTxt;
   var pagable=cat===''||cat==='images'||cat==='videos';
-  $('#prev').disabled=(($('#page').value|0))<=(MODE==='bing'?0:1);
-  $('#next').disabled=!pagable||items.length===0;
+  updatePager(items,total,pagable);
   if(items.length===0&&!dict){
     showNotice('info',emptyHint(cat));
+  }
+}
+
+// updatePager 翻页栏状态:上下文标签 + 按钮可用性。
+// v7 模式显示 offset 区间(有总数时附总数);SearXNG 模式显示页码。
+// next 禁用条件统一为"本页 0 条"(后端到末页返回空;totalEstimatedMatches
+// 有 offset+len 兜底语义,不能作为末页判据)。
+function updatePager(items,total,pagable){
+  var info=$('#pageInfo');
+  if(!pagable){info.textContent='';return}
+  if(MODE==='bing'){
+    var off=$('#page').value|0, n=items.length;
+    var txt='offset '+off+(n?'–'+(off+n):'');
+    if(total!==null&&total>0)txt+=' / 总数≈'+total;
+    info.textContent=txt;
+    $('#prev').disabled=off<=0;
+    $('#next').disabled=n===0;
+  }else{
+    var pg=$('#page').value|0;
+    info.textContent='第 '+pg+' 页'+($('#count').value?' · 每页 '+$('#count').value:'');
+    $('#prev').disabled=pg<=1;
+    $('#next').disabled=items.length===0;
   }
 }
 

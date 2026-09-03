@@ -105,7 +105,7 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api</code></pre></td><
 <tr><td><code>q</code></td><td>是</td><td>-</td><td>查询词</td></tr>
 <tr><td><code>category</code> / <code>categories</code></td><td>否</td><td>综合</td><td>搜索类别:<code>images</code> / <code>videos</code> / <code>news</code> / <code>dict</code>(不传 = 网页综合;SearXNG 协议用 <code>categories=images</code>,多值取首个)</td></tr>
 <tr><td><code>count</code></td><td>否</td><td>10</td><td>每页条数 1~50(Bing 实际返回以其为准;图片/视频按 count 精确切片)</td></tr>
-<tr><td><code>page</code></td><td>否</td><td>1</td><td>页码,兼容 SearXNG 的 <code>pageno</code>(新闻/词典不分页)</td></tr>
+<tr><td><code>page</code></td><td>否</td><td>1</td><td>页码,兼容 SearXNG 的 <code>pageno</code>(新闻/词典不分页);换算为 0 基 offset 多页聚合,count&gt;10 时自动跨 SERP 页补齐不跳空</td></tr>
 <tr><td><code>language</code></td><td>否</td><td>自动</td><td>语言/市场:<code>zh-CN</code>、<code>zh</code>、<code>zh-Hans</code>、<code>all</code>;未传时用 Accept-Language 头;词典固定中英双语</td></tr>
 </table>
 <pre><code>curl "http://localhost:__PORT__/search?q=golang&count=10&language=zh-CN"
@@ -131,7 +131,7 @@ GET http://localhost:__PORT__/v7/search?q=golang&mkt=en-US</code></pre>
 <tr><th>参数</th><th>必填</th><th>默认</th><th>说明</th></tr>
 <tr><td><code>q</code></td><td>是</td><td>-</td><td>查询词</td></tr>
 <tr><td><code>count</code></td><td>否</td><td>10</td><td>返回条数 1~50,不足时自动多页聚合</td></tr>
-<tr><td><code>offset</code></td><td>否</td><td>0</td><td>0 基偏移(官方语义,与 page 不同)</td></tr>
+<tr><td><code>offset</code></td><td>否</td><td>0</td><td>0 基偏移(官方语义,与 page 不同);对齐 Bing 页边界(0 基、10 的倍数)直取,不足时跟随 Bing 翻页链接补齐;风控拦截翻页时返回明确错误而非重复第 1 页</td></tr>
 <tr><td><code>mkt</code></td><td>否</td><td>自动</td><td>市场,如 <code>en-US</code>、<code>zh-CN</code>(即 <code>/search</code> 的 language)</td></tr>
 <tr><td><code>safeSearch</code></td><td>否</td><td>Moderate</td><td><code>Off</code> / <code>Moderate</code> / <code>Strict</code>(Strict 映射 Bing adlt=strict)</td></tr>
 <tr><td><code>responseFilter</code></td><td>否</td><td>-</td><td>答案类型过滤,支持 <code>Webpages</code>、<code>RelatedSearches</code></td></tr>

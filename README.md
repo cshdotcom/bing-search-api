@@ -34,10 +34,10 @@
 - `GET /languages` 枚举全部可用语言/市场
 - 未指定语言时自动使用请求的 `Accept-Language` 头
 - 自动还原 Bing `/ck/a` 重定向为真实 URL
-- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取)
+- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取);**翻页与浏览器同源**:按 Bing 自身翻页链接(FORM=PERE/first 0 基)逐页跟随,并对每次翻页做服务端页码校验——出口 IP 被风控导致 Bing 忽略翻页参数时明确报错,绝不静默把第 1 页冒充后续页
 - 零第三方依赖,仅 Go 标准库,单二进制部署
 - 提供全平台发行版(Linux / macOS / Windows × amd64 / arm64 / 386)与 Dockerfile
-- 单元测试 45 项:解析(网页/图片/视频/新闻/词典)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码、SearXNG 开关门禁
+- 单元测试 56 项:解析(网页/图片/视频/新闻/词典)、翻页(0 基 first 对齐/跟随 Bing 翻页链接/跨页去重/offset 精确切片/风控校验)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码、SearXNG 开关门禁
 
 ## 从官方 Bing Web Search API 迁移(v7 兼容)
 
@@ -163,7 +163,7 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api
 | q | 是 | - | 查询词 |
 | category / categories | 否 | 综合 | 搜索类别:`images` / `videos` / `news` / `dict`(不传 = 网页综合;SearXNG 协议用 `categories=images`,多值取首个;词典为本服务扩展类别) |
 | count | 否 | 10 | 每页条数,1~50(传给 Bing 的提示值,Bing 实际返回条数以它为准;图片/视频按 count 精确切片) |
-| page | 否 | 1 | 页码,从 1 开始(兼容 SearXNG 的 `pageno`;新闻/词典不分页) |
+| page | 否 | 1 | 页码,从 1 开始(兼容 SearXNG 的 `pageno`;新闻/词典不分页);后端换算为 0 基 offset 并多页聚合,count>10 时自动跨 SERP 页补齐,页间不跳空 |
 | language | 否 | 自动 | 语言/市场,如 `zh-CN`、`en`、`zh-Hans`、`all`,详见下方语言支持;词典固定中英双语 |
 | format | 否 | - | 仅为兼容 SearXNG 保留,传任何值都返回 JSON |
 
@@ -196,7 +196,7 @@ curl -X POST http://localhost:8080/search -d "q=golang&page=2&language=de"
 | ---- | ---- | ---- | ---- |
 | q | 是 | - | 查询词(POST 可用 JSON body 传,优先级高于查询串) |
 | count | 否 | 10 | 返回条数 1~50,不足时自动多页聚合(最多 6 次抓取) |
-| offset | 否 | 0 | 0 基结果偏移,0~9000(官方语义,与 `/search` 的 page 不同) |
+| offset | 否 | 0 | 0 基结果偏移,0~9000(官方语义,与 `/search` 的 page 不同);后端对齐到 Bing 页边界(0 基、10 的倍数)直取,不足 count 条时逐页跟随 Bing 自身翻页链接补齐 |
 | mkt | 否 | 自动 | 市场,如 `en-US`、`zh-CN`;非法值返回官方 400 格式 |
 | safeSearch | 否 | Moderate | `Off` / `Moderate` / `Strict`;Strict 映射 Bing `adlt=strict` |
 | responseFilter | 否 | - | 答案类型过滤,支持 `Webpages`、`RelatedSearches`(逗号分隔) |
@@ -503,7 +503,7 @@ curl "http://localhost:8080/v7/search?q=golang&subscription-key=你的密钥"
 
 - 通过解析 Bing 结果页 HTML 实现,页面结构变化时需要更新 `bing.go` / `vertical.go` 中的正则
 - `language` 映射到 Bing 的 `mkt`/`setlang`,是强提示但非强制:Bing 还会结合出口 IP 的地理定位与查询词本身判断市场,数据中心 IP 上个别查询可能被地理定位干扰(换部署位置或配 `BING_BASE` 可缓解)
-- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页
+- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页;**若出口 IP 被 Bing 风控导致翻页参数失效,服务会检测到(请求页 ≥2 却被返回第 1 页)并返回明确错误(502,含风控说明)而非静默返回重复结果**;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
 - 视频搜索 SERP 单页约 50 条,`offset` 超出单页范围为空(无跨页翻页能力);新闻为 RSS 固定批次(约 11~15 条);词典仅中英双向,其他语种词条未覆盖
 - v7 兼容层只实现网页类答案(webPages + relatedSearches),`responseFilter` 指定其他答案类型时按官方"过滤后为空"语义返回;`totalEstimatedMatches` 是 SERP 计数条上的估计值(垂直端点以 offset+结果数兜底)
 - 仅供学习与个人使用,请遵守 Bing 的服务条款;本服务不是官方 Bing API 的替代品,不提供官方 SLA 与配额语义
