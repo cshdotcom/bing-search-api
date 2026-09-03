@@ -1,0 +1,12 @@
+# 编译产物
+/bing-search-api
+/bing-search-api.exe
+dist/
+
+# 本地环境变量
+.env
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
