@@ -8,9 +8,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -171,14 +169,9 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
 	return results, suggestions, total, nil
 }
 
-// fetch 请求 Bing 搜索页并返回 HTML(最多 5MB)
+// fetch 请求 Bing 搜索页并返回 HTML(最多 5MB)。
+// 具体请求逻辑由 vertical.go 的 fetchBing 统一承载。
 func (e *BingEngine) fetch(ctx context.Context, qp QueryParams) ([]byte, error) {
-	u, err := url.Parse(e.Base)
-	if err != nil {
-		return nil, fmt.Errorf("BING_BASE 配置无效: %w", err)
-	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + "/search"
-
 	params := url.Values{}
 	params.Set("q", qp.Term)
 	params.Set("count", strconv.Itoa(qp.Count))
@@ -191,30 +184,7 @@ func (e *BingEngine) fetch(ctx context.Context, qp QueryParams) ([]byte, error) 
 		// Bing SERP 的严格安全搜索开关
 		params.Set("adlt", "strict")
 	}
-	u.RawQuery = params.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	acceptLang := "en-US,en;q=0.9"
-	if qp.Language != "" {
-		acceptLang = qp.Language + ",en;q=0.5"
-	}
-	req.Header.Set("Accept-Language", acceptLang)
-
-	resp, err := e.Client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 Bing 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Bing 返回状态码 %d", resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	return e.fetchBing(ctx, e.Base, "/search", params, acceptLanguageFor(qp.Language))
 }
 
 // parseBing 解析 SERP 页面,返回结果与相关搜索。

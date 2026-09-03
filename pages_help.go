@@ -54,7 +54,7 @@ footer{margin-top:26px;text-align:center;font-size:12.5px;color:var(--dim)}
 
 <div class="card">
 <h1>帮助文档</h1>
-<p class="lead">SearXNG 风格 + Bing 官方 API v7 调用兼容的极简搜索服务:只搜 Bing,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选。<b>SearXNG 兼容接口默认禁用</b>(设 ENABLE_SEARXNG=1 开启),默认仅开放 v7 兼容接口。</p>
+<p class="lead">SearXNG 风格 + Bing 官方 API v7 调用兼容的极简搜索服务:只搜 Bing,支持<b>网页 / 图片 / 视频 / 新闻 / 词典</b>五类搜索,结果保持原始顺序,JSON 返回。__LANG_COUNT__ 个语言/市场可选。<b>SearXNG 兼容接口默认禁用</b>(设 ENABLE_SEARXNG=1 开启),默认仅开放 v7 兼容接口。</p>
 </div>
 
 <div class="card">
@@ -91,8 +91,9 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api</code></pre></td><
 <table>
 <tr><th>端点</th><th>方法</th><th>说明</th></tr>
 <tr><td><code>/</code></td><td>GET</td><td>浏览器打开 → 测试界面;curl → 服务信息 JSON</td></tr>
-<tr><td><code>/search</code></td><td>GET/POST</td><td>SearXNG 风格搜索(参数见下表)<br><span style="color:#e8b44f;font-size:12.5px">⚠ 默认禁用:设 <code>ENABLE_SEARXNG=1</code> 后重启开启</span></td></tr>
-<tr><td><code>/v7/search</code></td><td>GET/POST</td><td><b>Bing 官方 Search API v7 调用兼容</b>(见下方专节)</td></tr>
+<tr><td><code>/search</code></td><td>GET/POST</td><td>SearXNG 风格搜索(参数见下表;支持类别:网页/图片/视频/新闻/词典)<br><span style="color:#e8b44f;font-size:12.5px">⚠ 默认禁用:设 <code>ENABLE_SEARXNG=1</code> 后重启开启</span></td></tr>
+<tr><td><code>/v7/search</code></td><td>GET/POST</td><td><b>Bing 官方 Web Search API v7 调用兼容</b>(见下方专节)</td></tr>
+<tr><td><code>/v7/images/search</code><br><code>/v7/videos/search</code><br><code>/v7/news/search</code><br><code>/v7/dict/search</code></td><td>GET/POST</td><td><b>垂直搜索</b>:官方 Image/Video/News API 兼容 + 词典(服务扩展),详见下方专节;均支持 <code>/v7.0/</code>、<code>/bing/v7(.0)/</code> 别名前缀,同受 BING_API_KEY 鉴权</td></tr>
 <tr><td><code>/languages</code></td><td>GET</td><td>全部支持的语言/市场列表(JSON)</td></tr>
 <tr><td><code>/help</code></td><td>GET</td><td>本帮助页</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>健康检查</td></tr>
@@ -102,16 +103,19 @@ docker run -d -p 8080:8080 --name bing-search bing-search-api</code></pre></td><
 <table>
 <tr><th>参数</th><th>必填</th><th>默认</th><th>说明</th></tr>
 <tr><td><code>q</code></td><td>是</td><td>-</td><td>查询词</td></tr>
-<tr><td><code>count</code></td><td>否</td><td>10</td><td>每页条数 1~50(Bing 实际返回以其为准)</td></tr>
-<tr><td><code>page</code></td><td>否</td><td>1</td><td>页码,兼容 SearXNG 的 <code>pageno</code></td></tr>
-<tr><td><code>language</code></td><td>否</td><td>自动</td><td>语言/市场:<code>zh-CN</code>、<code>zh</code>、<code>zh-Hans</code>、<code>all</code>;未传时用 Accept-Language 头</td></tr>
+<tr><td><code>category</code> / <code>categories</code></td><td>否</td><td>综合</td><td>搜索类别:<code>images</code> / <code>videos</code> / <code>news</code> / <code>dict</code>(不传 = 网页综合;SearXNG 协议用 <code>categories=images</code>,多值取首个)</td></tr>
+<tr><td><code>count</code></td><td>否</td><td>10</td><td>每页条数 1~50(Bing 实际返回以其为准;图片/视频按 count 精确切片)</td></tr>
+<tr><td><code>page</code></td><td>否</td><td>1</td><td>页码,兼容 SearXNG 的 <code>pageno</code>(新闻/词典不分页)</td></tr>
+<tr><td><code>language</code></td><td>否</td><td>自动</td><td>语言/市场:<code>zh-CN</code>、<code>zh</code>、<code>zh-Hans</code>、<code>all</code>;未传时用 Accept-Language 头;词典固定中英双语</td></tr>
 </table>
 <pre><code>curl "http://localhost:__PORT__/search?q=golang&count=10&language=zh-CN"
+curl "http://localhost:__PORT__/search?q=cat&categories=images&count=20"   <span style="color:#8b97a6"># 图片</span>
+curl "http://localhost:__PORT__/search?q=hello&category=dict"             <span style="color:#8b97a6"># 词典</span>
 
 curl -X POST http://localhost:__PORT__/search \
      -H "Content-Type: application/json" \
      -d '{"q":"openai","count":5,"page":2,"language":"en-US"}'</code></pre>
-<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持,405 方法错误,502 Bing 抓取失败,响应均为 JSON。</p>
+<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持/类别不支持,405 方法错误,502 Bing 抓取失败,响应均为 JSON。图片/视频结果附带 SearXNG 垂直字段(<code>template</code>、<code>img_src</code>、<code>thumbnail_src</code>、<code>length</code>、<code>publishedDate</code> 等);词典以 <code>answers</code> 返回词条摘要。</p>
 </div>
 
 <div class="card">
@@ -159,6 +163,28 @@ curl -X POST http://localhost:__PORT__/v7/search \
 </div>
 
 <div class="card">
+<h2>垂直搜索(图片 / 视频 / 新闻 / 词典)</h2>
+<p>除网页综合搜索外,服务直接抓取 Bing 各垂直端点的<b>服务端可返回数据</b>,同时提供两套接口:SearXNG 风格(<code>/search?categories=…</code>)与官方 v7 风格(<code>/v7/{images,videos,news,dict}/search</code>)。两者参数一致(q/count/offset/mkt/safeSearch,POST JSON body 优先),鉴权策略一致(受 BING_API_KEY 保护,与 /v7/search 相同)。</p>
+<table>
+<tr><th>端点</th><th>响应结构</th><th>分页与边界</th></tr>
+<tr><td><code>/v7/images/search</code></td><td>官方 Images 结构:<code>_type=Images</code>,<code>value[]{webSearchUrl,name,thumbnailUrl,contentUrl,hostPageUrl,encodingFormat,thumbnail,imageInsightsToken}</code>,<code>nextOffset / totalEstimatedMatches</code></td><td>count≤150;offset 经 async <code>first</code> 翻页;aspect/color 等参数接受但忽略</td></tr>
+<tr><td><code>/v7/videos/search</code></td><td>官方 Videos 结构:<code>_type=Videos</code>,<code>value[]{name,thumbnailUrl,contentUrl,hostPageUrl,duration(ISO 8601),publisher[],videoId}</code></td><td>count≤100;SERP 单页约 50 条,offset 在单页内切片(深分页能力有限)</td></tr>
+<tr><td><code>/v7/news/search</code></td><td>官方 News 结构:<code>_type=News</code>,<code>value[]{name,url,description,datePublished,provider[],headline}</code></td><td>RSS 固定一批(约 11~15 条);count/offset 接受但仅切片;语言由查询词与 Accept-Language 决定</td></tr>
+<tr><td><code>/v7/dict/search</code><span class="tag">服务扩展</span></td><td>词典结构:<code>_type=Dict</code>,<code>word</code>,<code>pronunciation{us,uk,pinyin}</code>,<code>value[]{pos,def,examples[]}</code></td><td>中英双向(英文词→中文释义,中文词→英文释义);无分页;数据源 cn.bing.com 词典</td></tr>
+</table>
+<pre><code>curl "http://localhost:__PORT__/v7/images/search?q=cat&count=20&mkt=en-US"
+curl "http://localhost:__PORT__/v7/videos/search?q=golang&count=10"
+curl "http://localhost:__PORT__/v7/news/search?q=artificial+intelligence"
+curl "http://localhost:__PORT__/v7/dict/search?q=hello"
+
+# 设 BING_API_KEY 后:
+curl -H "Ocp-Apim-Subscription-Key: $BING_API_KEY" \
+     "http://localhost:__PORT__/v7/images/search?q=cat&count=20"</code></pre>
+<p style="color:#e8b44f;font-size:13.5px">⚠ <b>不支持学术/购物/地图搜索</b>:Bing 学术(cn.bing.com/academic)、购物(/shop)、地图均为纯客户端(JS)渲染页面,服务端抓取拿不到结果数据;与其提供假接口,不如明确拒绝——传 <code>categories=academic|shopping|maps</code> 会返回 400 与未支持原因说明。SearXNG 的 science 类别在官方生态下由 arXiv/crossref 等引擎提供,与 Bing 无关,故不映射。</p>
+<p style="color:var(--dim);font-size:13.5px">测试界面(/)已内置五类切换:选择「类别」后,两种接口模式分别发往对应端点;v7 模式提供 <b>API Key 输入框</b>(密钥仅存本浏览器 localStorage,以 Ocp-Apim-Subscription-Key 头发送,便于 BING_API_KEY 鉴权场景实测)。</p>
+</div>
+
+<div class="card">
 <h2>语言支持(与 SearXNG 相同)</h2>
 <p>共 <b>__LANG_COUNT__</b> 个市场,取值规则与 SearXNG 保持一致:</p>
 <table>
@@ -190,7 +216,8 @@ systemctl disable bing-search-api     <span style="color:#8b97a6"># 取消开机
 <tr><td><code>HOST</code></td><td>0.0.0.0</td><td>监听地址(命令行 <code>-host</code> 优先)</td></tr>
 <tr><td><code>BING_BASE</code></td><td>www.bing.com</td><td>Bing 入口,可换 <code>cn.bing.com</code></td></tr>
 <tr><td><code>ENABLE_SEARXNG</code></td><td>关</td><td><b>SearXNG 兼容接口 /search 开关</b>:设 <code>1</code>(或 true/yes/on)开启;不设则该接口返回 403</td></tr>
-<tr><td><code>BING_API_KEY</code></td><td>空</td><td>设置后 /v7/* 需 <code>Ocp-Apim-Subscription-Key</code> 头(或 subscription-key 参数)匹配,详见上节</td></tr>
+<tr><td><code>BING_API_KEY</code></td><td>空</td><td>设置后 /v7/*(含垂直端点)需 <code>Ocp-Apim-Subscription-Key</code> 头(或 subscription-key 参数)匹配,详见上节</td></tr>
+<tr><td><code>BING_DICT_BASE</code></td><td>cn.bing.com</td><td>词典数据源入口(www 域不提供词典服务,固定走 cn;自建反代时可覆盖)</td></tr>
 </table>
 <pre><code># 直接运行时开启 SearXNG 接口
 ENABLE_SEARXNG=1 ./bing-search-api
@@ -208,7 +235,7 @@ sudo systemctl restart bing-search-api</code></pre>
 <li><b>安装/卸载仅限本机 CLI</b>:必须在服务器终端执行 <code>sudo bing-search-api install</code>,sudo 密码即鉴权;Web 端不提供任何安装入口(HTTP 端口无鉴权,网页按钮会变成远程改配置的后门)</li>
 <li><b>SearXNG 兼容接口默认禁用</b>:无鉴权的开放搜索代理会被陌生流量滥用(匿名白嫖你的出口 IP 抓 Bing、触发风控连坐),故 <code>/search</code> 默认返回 403,须设 <code>ENABLE_SEARXNG=1</code> 显式开启;v7 兼容接口建议配 <code>BING_API_KEY</code> 使用</li>
 <li><b>服务进程非特权运行</b>:systemd 动态用户(DynamicUser) + 文件系统只读 + 禁设备/内核写入,仅保留低端口绑定能力;老版本 systemd 自动退回兼容单元</li>
-<li><b>默认最小暴露面</b>:开箱即用时仅 /v7/search(建议配密钥)+ /languages + /help + /healthz 可访问</li>
+<li><b>默认最小暴露面</b>:开箱即用时仅 /v7 全部端点(建议配密钥)+ /languages + /help + /healthz 可访问</li>
 </ul>
 </div>
 
@@ -216,8 +243,9 @@ sudo systemctl restart bing-search-api</code></pre>
 <h2>与 SearXNG 的关系</h2>
 <ul>
 <li>只保留 <b>bing</b> 一个引擎:无聚合、无重排、无打分,结果顺序 = Bing 原始顺序(<code>position</code> 标注位次)</li>
-<li>响应字段与 SearXNG 对齐:<code>query / results / answers / corrections / infoboxes / suggestions / unresponsive_engines</code></li>
+<li>响应字段与 SearXNG 对齐:<code>query / results / answers / corrections / infoboxes / suggestions / unresponsive_engines</code>;垂直结果附带 <code>template / img_src / thumbnail_src / length / publishedDate</code> 等 SearXNG 垂直字段</li>
 <li><code>language</code> 参数语义相同,映射到 Bing 的 <code>mkt + setlang</code>;自动还原 Bing <code>/ck/a</code> 重定向</li>
+<li><code>categories</code> 参数与 SearXNG 一致(取第一个类别),词典为本服务扩展类别</li>
 <li>零第三方依赖,单二进制,标准库实现</li>
 </ul>
 </div>

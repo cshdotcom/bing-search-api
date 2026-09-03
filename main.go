@@ -13,9 +13,13 @@ package main
 //
 // 端点:
 //   GET|POST /search         SearXNG 兼容接口【默认禁用,设 ENABLE_SEARXNG=1 开启】
-//                             (q 必填;count/page/language 可选)
-//   GET|POST /v7/search       Bing 官方 Search API v7 调用兼容(默认启用;q/count/offset/mkt/safeSearch…)
+//                             (q 必填;count/page/language 可选;category/categories 选垂直)
+//   GET|POST /v7/search       Bing 官方 Web Search API v7 调用兼容(默认启用;q/count/offset/mkt/safeSearch…)
 //                             (别名 /v7.0/search、/bing/v7/search、/bing/v7.0/search)
+//   GET|POST /v7/images/search  图片搜索(官方 Image Search API 兼容,同样支持上述别名前缀)
+//   GET|POST /v7/videos/search  视频搜索(官方 Video Search API 兼容)
+//   GET|POST /v7/news/search    新闻搜索(官方 News Search API 兼容)
+//   GET|POST /v7/dict/search    词典查询(服务扩展,官方无此端点)
 //   GET      /languages 全部支持的语言/市场列表
 //   GET      /help      帮助文档页
 //   GET      /healthz   健康检查
@@ -51,6 +55,7 @@ type searchParams struct {
 	Count    int    // 每页条数(1~50)
 	Page     int    // 页码(从 1 开始)
 	Language string // 语言/市场,如 zh-CN,为空则由 Bing 自动判断
+	Category string // 垂直类别:空=网页综合;images/videos/news/dict
 }
 
 func envOr(key, def string) string {
@@ -210,11 +215,17 @@ Web 界面(服务启动后浏览器访问):
   http://localhost:%s/help      帮助文档(端点/参数/管理命令)
 
 API:
-  GET|POST /v7/search Bing 官方 Search API v7 兼容(默认启用):q、count、offset、mkt、safeSearch
+  GET|POST /v7/search Bing 官方 Web Search API v7 兼容(默认启用):q、count、offset、mkt、safeSearch
                        (官方 API 已退役,存量代码改 base URL 即可继续用;
                         设 BING_API_KEY 后需 Ocp-Apim-Subscription-Key 头)
+  GET|POST /v7/images/search  图片搜索(官方 Image Search API 兼容,count≤150)
+  GET|POST /v7/videos/search  视频搜索(官方 Video Search API 兼容)
+  GET|POST /v7/news/search    新闻搜索(官方 News Search API 兼容)
+  GET|POST /v7/dict/search    词典查询(服务扩展,官方无此端点)
+                       (以上 v7 端点均支持 /v7.0/、/bing/v7(.0)/ 别名前缀,同样受 BING_API_KEY 鉴权)
   GET|POST /search    SearXNG 兼容接口【默认禁用】:设环境变量 ENABLE_SEARXNG=1 后重启开启
-                       (q、count、page、language;开放代理有滥用风险,故默认关闭)
+                       (q、count、page、language;category/categories 选垂直 images/videos/news/dict;
+                        开放代理有滥用风险,故默认关闭)
   GET      /languages 全部 %d 个语言/市场
   GET      /healthz   健康检查
   https://github.com/cshdotcom/bing-search-api
@@ -242,18 +253,7 @@ func serve(port, host, bingBase string) {
 		},
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/search", srv.handleSearch)
-	// Bing 官方 Search API v7 调用兼容层:覆盖官方两代路径 + 常见变体
-	v7Search := http.HandlerFunc(srv.handleBingV7Search)
-	mux.HandleFunc("/v7/search", v7Search)
-	mux.HandleFunc("/v7.0/search", v7Search)
-	mux.HandleFunc("/bing/v7/search", v7Search)
-	mux.HandleFunc("/bing/v7.0/search", v7Search)
-	mux.HandleFunc("/languages", srv.handleLanguages)
-	mux.HandleFunc("/healthz", srv.handleHealth)
-	mux.HandleFunc("/help", srv.handleHelpPage)
-	mux.HandleFunc("/", srv.handleRoot)
+	mux := srv.routes()
 
 	addr := host + ":" + portN
 	httpSrv := &http.Server{
@@ -267,9 +267,9 @@ func serve(port, host, bingBase string) {
 	go func() {
 		log.Printf("bing-search-api %s 已启动: http://localhost:%s/ (测试界面)", version, portN)
 		if searxngEnabled() {
-			log.Printf("帮助文档: /help   API: /search(SearXNG 兼容,已启用) + /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+			log.Printf("帮助文档: /help   API: /search(SearXNG 兼容,已启用,含 images/videos/news/dict 垂直) + /v7/{,images/,videos/,news/,dict/}search(官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
 		} else {
-			log.Printf("帮助文档: /help   API: /v7/search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
+			log.Printf("帮助文档: /help   API: /v7/{,images/,videos/,news/,dict/}search(Bing 官方 API 兼容)   语言: /languages (Bing: %s)", bingBase)
 			log.Printf("SearXNG 兼容接口 /search 已禁用(默认):设 ENABLE_SEARXNG=1 后重启可开启")
 		}
 		if os.Getenv("BING_API_KEY") != "" {
@@ -296,6 +296,29 @@ type server struct {
 	engine *BingEngine
 }
 
+// routes 注册全部 HTTP 路由(serve 与单元测试共用)。
+// Bing 官方 Search API v7 调用兼容层:web + 垂直(images/videos/news/dict),
+// 每个端点均覆盖官方两代路径 + 常见变体(4 个前缀别名)。
+func (s *server) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search", s.handleSearch)
+	v7Route := func(path string, h http.HandlerFunc) {
+		for _, prefix := range []string{"/v7/", "/v7.0/", "/bing/v7/", "/bing/v7.0/"} {
+			mux.HandleFunc(prefix+path, h)
+		}
+	}
+	v7Route("search", http.HandlerFunc(s.handleBingV7Search))
+	v7Route("images/search", http.HandlerFunc(s.handleBingV7Images))
+	v7Route("videos/search", http.HandlerFunc(s.handleBingV7Videos))
+	v7Route("news/search", http.HandlerFunc(s.handleBingV7News))
+	v7Route("dict/search", http.HandlerFunc(s.handleBingV7Dict))
+	mux.HandleFunc("/languages", s.handleLanguages)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/help", s.handleHelpPage)
+	mux.HandleFunc("/", s.handleRoot)
+	return mux
+}
+
 // handleSearch 搜索入口,支持 GET 与 POST(表单或 JSON)。
 // 默认禁用:仅当环境变量 ENABLE_SEARXNG 开启时可用(见 searxngEnabled)。
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +339,17 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 垂直类别归一:images/videos/news/dict(学术/购物/地图等
+	// 纯客户端渲染的类别会在这里得到明确错误说明)
+	category, err := normalizeCategory(p.Category)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: err.Error(),
+			Query: p.Q,
+		})
+		return
+	}
+
 	// 语言解析(与 SearXNG 行为一致):
 	//   - language=all/any     → 不限语言
 	//   - 未指定/auto          → 依次尝试 Accept-Language 头,失败则由 Bing 自动判断
@@ -331,6 +365,26 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+
+	// 垂直搜索分发(非网页综合)
+	if category != "" {
+		resp, err := s.searchVertical(ctx, p, category, market)
+		if err != nil {
+			log.Printf("垂直搜索失败 cat=%q q=%q lang=%q: %v", category, p.Q, market, err)
+			writeJSON(w, http.StatusBadGateway, ErrorResponse{
+				Error: "Bing 查询失败: " + err.Error(),
+				Query: p.Q,
+			})
+			return
+		}
+		if market == "" {
+			resp.Language = "all"
+		} else {
+			resp.Language = market
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 
 	resp, err := s.engine.Search(ctx, QueryParams{
 		Term:     p.Q,
@@ -378,10 +432,12 @@ func paramsFromRequest(r *http.Request) searchParams {
 	// POST + JSON
 	if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		var body struct {
-			Q        string `json:"q"`
-			Count    int    `json:"count"`
-			Page     int    `json:"page"`
-			Language string `json:"language"`
+			Q          string `json:"q"`
+			Count      int    `json:"count"`
+			Page       int    `json:"page"`
+			Language   string `json:"language"`
+			Category   string `json:"category"`
+			Categories string `json:"categories"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err == nil {
 			if body.Q != "" {
@@ -396,6 +452,7 @@ func paramsFromRequest(r *http.Request) searchParams {
 			if body.Language != "" {
 				p.Language = body.Language
 			}
+			p.Category = pickCategory(body.Category, body.Categories)
 			return clamp(p)
 		}
 		// JSON 解析失败则继续按表单/查询串处理
@@ -404,6 +461,7 @@ func paramsFromRequest(r *http.Request) searchParams {
 	// URL 查询串 / POST 表单(FormValue 会自动合并两者)
 	p.Q = r.FormValue("q")
 	p.Language = r.FormValue("language")
+	p.Category = pickCategory(r.FormValue("category"), r.FormValue("categories"))
 	if v, err := strconv.Atoi(r.FormValue("count")); err == nil {
 		p.Count = v
 	}

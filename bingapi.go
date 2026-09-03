@@ -27,8 +27,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -124,98 +122,9 @@ type v7ParamError struct {
 
 // v7ParamsFromRequest 合并三处来源:JSON body(POST)优先,其次表单,再次查询串。
 // 返回已校验的参数;校验失败时返回 *v7ParamError(官方格式)。
+// 实际解析由 v7ParamsFromRequestBounded 承载(web 端点边界:count 1~50、offset 0~9000)。
 func v7ParamsFromRequest(r *http.Request) (v7Params, *v7ParamError) {
-	p := v7Params{Count: 10, Offset: 0, SafeSearch: "Moderate"}
-
-	// POST + JSON body(官方 SDK 大查询场景)
-	body := map[string]any{}
-	if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var m map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&m); err == nil {
-			body = m
-		}
-	}
-
-	// get 依次从 JSON body / 表单 / 查询串取值
-	get := func(name string) string {
-		if v, ok := body[name]; ok {
-			switch tv := v.(type) {
-			case string:
-				return tv
-			case float64:
-				return strconv.FormatFloat(tv, 'f', -1, 64)
-			case bool:
-				return strconv.FormatBool(tv)
-			}
-		}
-		return r.FormValue(name)
-	}
-
-	// q:必填
-	if p.Q = strings.TrimSpace(get("q")); p.Q == "" {
-		return p, &v7ParamError{
-			SubCode: "ParameterMissing", Param: "q",
-			Message: "缺少必填参数 q(查询词)",
-		}
-	}
-
-	// count:1~50,官方上限 50
-	if s := strings.TrimSpace(get("count")); s != "" {
-		if n, err := strconv.Atoi(s); err != nil || n < 1 || n > 50 {
-			return p, &v7ParamError{
-				SubCode: "ParameterInvalid", Param: "count", Value: s,
-				Message: "count 必须是 1~50 的整数",
-			}
-		} else {
-			p.Count = n
-		}
-	}
-
-	// offset:0~9000(官方协议的 0 基偏移)
-	if s := strings.TrimSpace(get("offset")); s != "" {
-		if n, err := strconv.Atoi(s); err != nil || n < 0 || n > 9000 {
-			return p, &v7ParamError{
-				SubCode: "ParameterInvalid", Param: "offset", Value: s,
-				Message: "offset 必须是 0~9000 的整数",
-			}
-		} else {
-			p.Offset = n
-		}
-	}
-
-	// mkt:留待 handler 查语言表校验
-	p.Mkt = strings.TrimSpace(get("mkt"))
-
-	// setLang:接受但忽略(官方语义仅影响界面字符串,不影响结果)
-	p.SetLang = strings.TrimSpace(get("setLang"))
-
-	// safeSearch:Off / Moderate / Strict(大小写不敏感,归一化)
-	if s := strings.TrimSpace(get("safeSearch")); s != "" {
-		switch strings.ToLower(s) {
-		case "off":
-			p.SafeSearch = "Off"
-		case "moderate":
-			p.SafeSearch = "Moderate"
-		case "strict":
-			p.SafeSearch = "Strict"
-		default:
-			return p, &v7ParamError{
-				SubCode: "ParameterInvalid", Param: "safeSearch", Value: s,
-				Message: "safeSearch 必须是 Off / Moderate / Strict",
-			}
-		}
-	}
-
-	// responseFilter:逗号分隔答案类型,小写归一
-	if s := strings.TrimSpace(get("responseFilter")); s != "" {
-		for _, tok := range strings.Split(s, ",") {
-			if tok = strings.TrimSpace(strings.ToLower(tok)); tok != "" {
-				p.RespFilter = append(p.RespFilter, tok)
-			}
-		}
-	}
-
-	return p, nil
+	return v7ParamsFromRequestBounded(r, v7Bounds{MaxCount: 50, MaxOffset: 9000})
 }
 
 // ── 处理器 ─────────────────────────────────────────────────────
@@ -231,18 +140,8 @@ func (s *server) handleBingV7Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 鉴权:BING_API_KEY 设置后,校验官方订阅密钥头(或 APIM 查询参数)
-	if want := envOr("BING_API_KEY", ""); want != "" {
-		provided := r.Header.Get("Ocp-Apim-Subscription-Key")
-		if provided == "" {
-			provided = r.URL.Query().Get("subscription-key")
-		}
-		if provided != want {
-			writeBingV7Error(w, http.StatusUnauthorized, bingV7Error{
-				Code:    "UnauthorizedAccess",
-				Message: "Access denied due to invalid subscription key. 请通过 Ocp-Apim-Subscription-Key 请求头携带正确密钥",
-			})
-			return
-		}
+	if !s.v7AuthOK(w, r) {
+		return
 	}
 
 	p, perr := v7ParamsFromRequest(r)
@@ -369,6 +268,27 @@ func bingV7WebSearchURL(q, market string) string {
 		u += "&mkt=" + url.QueryEscape(market)
 	}
 	return u
+}
+
+// v7AuthOK v7 端点统一鉴权(设 BING_API_KEY 后校验):
+// 校验 Ocp-Apim-Subscription-Key 请求头(官方方式)或 subscription-key
+// 查询参数(Azure APIM 方式);失败时已写出 401 响应,返回 false。
+// bingapi.go 与 bingapi_vertical.go 的全部 v7 端点共用。
+func (s *server) v7AuthOK(w http.ResponseWriter, r *http.Request) bool {
+	if want := envOr("BING_API_KEY", ""); want != "" {
+		provided := r.Header.Get("Ocp-Apim-Subscription-Key")
+		if provided == "" {
+			provided = r.URL.Query().Get("subscription-key")
+		}
+		if provided != want {
+			writeBingV7Error(w, http.StatusUnauthorized, bingV7Error{
+				Code:    "UnauthorizedAccess",
+				Message: "Access denied due to invalid subscription key. 请通过 Ocp-Apim-Subscription-Key 请求头携带正确密钥",
+			})
+			return false
+		}
+	}
+	return true
 }
 
 // writeBingV7Error 按官方 ErrorResponse 结构输出错误
