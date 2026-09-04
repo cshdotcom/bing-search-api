@@ -371,7 +371,11 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
                 resp, err := s.searchVertical(ctx, p, category, market)
                 if err != nil {
                         log.Printf("垂直搜索失败 cat=%q q=%q lang=%q: %v", category, p.Q, market, err)
-                        writeJSON(w, http.StatusBadGateway, ErrorResponse{
+                        status, retryAfter := upstreamErrorStatus(err)
+                        if retryAfter != "" {
+                                w.Header().Set("Retry-After", retryAfter)
+                        }
+                        writeJSON(w, status, ErrorResponse{
                                 Error: "Bing 查询失败: " + err.Error(),
                                 Query: p.Q,
                         })
@@ -397,18 +401,15 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
                 Count:    p.Count,
         })
         if err != nil {
-                // 翻页被 Bing 风控拦截:明确报错(不再静默返回第 1 页内容冒充后续页)
-                if errors.Is(err, ErrPagingBlocked) {
-                        log.Printf("搜索翻页被风控拦截 q=%q page=%d: %v", p.Q, p.Page, err)
-                        writeJSON(w, http.StatusBadGateway, ErrorResponse{
-                                Error: err.Error(),
-                                Query: p.Q,
-                        })
-                        return
+                // 上游失败统一走 upstreamErrorStatus:风控/限流 → 429(4xx 响应体
+                // 可穿透网关,5xx 常被替换成裸错误页);明确报错,不再静默截断
+                log.Printf("搜索失败 q=%q lang=%q page=%d: %v", p.Q, market, p.Page, err)
+                status, retryAfter := upstreamErrorStatus(err)
+                if retryAfter != "" {
+                        w.Header().Set("Retry-After", retryAfter)
                 }
-                log.Printf("搜索失败 q=%q lang=%q: %v", p.Q, market, err)
-                writeJSON(w, http.StatusBadGateway, ErrorResponse{
-                        Error: "Bing 查询失败: " + err.Error(),
+                writeJSON(w, status, ErrorResponse{
+                        Error: err.Error(),
                         Query: p.Q,
                 })
                 return

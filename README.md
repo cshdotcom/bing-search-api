@@ -57,7 +57,7 @@
 | 参数 `freshness / textDecorations / textFormat / enableEntities …` | 接受但忽略(直接报错会破坏存量客户端) |
 | 鉴权头 `Ocp-Apim-Subscription-Key` | 可选:设 `BING_API_KEY` 环境变量后启用校验(401 返回官方格式);不设则开放 |
 | 响应 `SearchResponse`: `queryContext` / `webPages` / `relatedSearches` | 结构与字段名逐一对齐,含 `webSearchUrl`、`totalEstimatedMatches`、`value[].id/name/url/displayUrl/snippet/…` |
-| 响应 `ErrorResponse`: `errors[].code/subCode/message/parameter` | 完全一致(400 参数错误、401 密钥错误、502 上游失败) |
+| 响应 `ErrorResponse`: `errors[].code/subCode/message/parameter` | 完全一致(400 参数错误、401 密钥错误、429 风控/限流、502 上游失败) |
 | 路径 `/v7/search` 与 `/bing/v7.0/search` | 4 个等价别名全覆盖 |
 
 兼容边界(诚实声明):仅实现网页类答案(webPages + relatedSearches);`totalEstimatedMatches` 取自 SERP 计数条,解析不到时以已知结果数兜底;`setLang` 接受但按官方语义不影响结果。
@@ -249,7 +249,8 @@ curl "http://localhost:8080/v7/search?q=golang" -H "Ocp-Apim-Subscription-Key: x
 | 400 | 缺 q / 参数非法 / mkt 不支持 | `InvalidRequest` + `ParameterMissing`/`ParameterInvalid` |
 | 401 | `BING_API_KEY` 已设但密钥不匹配 | `UnauthorizedAccess` |
 | 405 | 方法不支持 | `InvalidRequest` |
-| 502 | Bing 抓取失败/被限流 | `ServerError` + `UnexpectedError` |
+| 429 | 出口 IP 被 Bing 风控(翻页参数被忽略)/ Bing 上游限流 | `ServerError` + `RequestThrottled`,附 `Retry-After` 头 |
+| 502 | 其他上游失败(网络错误等) | `ServerError` + `UnexpectedError` |
 
 ```json
 {"_type":"ErrorResponse","errors":[{"code":"InvalidRequest","subCode":"ParameterInvalid",
@@ -399,7 +400,8 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | 400 | 类别不支持(如 academic/shopping/maps/未知值) | `{"error":"不支持的搜索类别 academic/学术:Bing 学术搜索页面为纯客户端(JS)渲染,..."}` |
 | 403 | 未设 ENABLE_SEARXNG(默认禁用) | `{"error":"SearXNG 兼容接口已禁用(默认):如需开启,设环境变量 ENABLE_SEARXNG=1 后重启服务;..."}` |
 | 405 | 方法不支持 | `{"error":"仅支持 GET / POST"}` |
-| 502 | Bing 抓取失败/被限流 | `{"error":"Bing 查询失败: ..."}` |
+| 429 | 出口 IP 被 Bing 风控(翻页被忽略),附 `Retry-After` 头 | `{"error":"Bing 忽略了翻页参数 first(疑似出口 IP 被风控):..."}` |
+| 502 | 其他上游失败 | `{"error":"Bing 查询失败: ..."}` |
 
 ### 其他端点
 
@@ -503,7 +505,7 @@ curl "http://localhost:8080/v7/search?q=golang&subscription-key=你的密钥"
 
 - 通过解析 Bing 结果页 HTML 实现,页面结构变化时需要更新 `bing.go` / `vertical.go` 中的正则
 - `language` 映射到 Bing 的 `mkt`/`setlang`,是强提示但非强制:Bing 还会结合出口 IP 的地理定位与查询词本身判断市场,数据中心 IP 上个别查询可能被地理定位干扰(换部署位置或配 `BING_BASE` 可缓解)
-- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页;**若出口 IP 被 Bing 风控导致翻页参数失效,服务会检测到(请求页 ≥2 却被返回第 1 页)并返回明确错误(502,含风控说明)而非静默返回重复结果**;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
+- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页;**若出口 IP 被 Bing 风控导致翻页参数失效(深 offset 翻页、count>10 跨页聚合同样受影响),服务会检测到(请求页 ≥2 却被返回第 1 页)并返回 429 明确报错(含风控说明与 `Retry-After`)而非静默返回重复结果或截断结果**——用 429 而非 502 是因为许多反代/网关会把 5xx 响应体替换成自家裸错误页(如 `error code: 502`),客户端将看不到诊断信息,而 4xx 响应体通常原样透传;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
 - 视频搜索 SERP 单页约 50 条,`offset` 超出单页范围为空(无跨页翻页能力);新闻为 RSS 固定批次(约 11~15 条);词典仅中英双向,其他语种词条未覆盖
 - v7 兼容层只实现网页类答案(webPages + relatedSearches),`responseFilter` 指定其他答案类型时按官方"过滤后为空"语义返回;`totalEstimatedMatches` 是 SERP 计数条上的估计值(垂直端点以 offset+结果数兜底)
 - 仅供学习与个人使用,请遵守 Bing 的服务条款;本服务不是官方 Bing API 的替代品,不提供官方 SLA 与配额语义

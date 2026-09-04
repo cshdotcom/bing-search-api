@@ -196,9 +196,17 @@ func (s *server) handleBingV7Search(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			log.Printf("v7 搜索失败 q=%q mkt=%q offset=%d: %v", p.Q, market, p.Offset, err)
-			writeBingV7Error(w, http.StatusBadGateway, bingV7Error{
+			// 风控/限流类错误 → 429(官方 v7 限流语义;且 4xx 响应体可穿透
+			// 大多数网关,5xx 常被替换成裸错误页导致客户端无法诊断)
+			status, retryAfter := upstreamErrorStatus(err)
+			subCode := "UnexpectedError"
+			if status == http.StatusTooManyRequests {
+				subCode = "RequestThrottled"
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			writeBingV7Error(w, status, bingV7Error{
 				Code:    "ServerError",
-				SubCode: "UnexpectedError",
+				SubCode: subCode,
 				Message: "上游 Bing 查询失败: " + err.Error(),
 			})
 			return

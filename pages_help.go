@@ -115,7 +115,7 @@ curl "http://localhost:__PORT__/search?q=hello&category=dict"             <span 
 curl -X POST http://localhost:__PORT__/search \
      -H "Content-Type: application/json" \
      -d '{"q":"openai","count":5,"page":2,"language":"en-US"}'</code></pre>
-<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持/类别不支持,405 方法错误,502 Bing 抓取失败,响应均为 JSON。图片/视频结果附带 SearXNG 垂直字段(<code>template</code>、<code>img_src</code>、<code>thumbnail_src</code>、<code>length</code>、<code>publishedDate</code> 等);词典以 <code>answers</code> 返回词条摘要。</p>
+<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持/类别不支持,405 方法错误,429 出口 IP 被 Bing 风控(附 Retry-After),502 其他上游失败,响应均为 JSON。图片/视频结果附带 SearXNG 垂直字段(<code>template</code>、<code>img_src</code>、<code>thumbnail_src</code>、<code>length</code>、<code>publishedDate</code> 等);词典以 <code>answers</code> 返回词条摘要。</p>
 </div>
 
 <div class="card">
@@ -138,7 +138,7 @@ GET http://localhost:__PORT__/v7/search?q=golang&mkt=en-US</code></pre>
 <tr><td><code>setLang</code></td><td>否</td><td>-</td><td>接受但忽略(官方语义仅影响界面字符串)</td></tr>
 </table>
 <p>等价别名(覆盖官方两代路径):<code>/v7.0/search</code> · <code>/bing/v7/search</code> · <code>/bing/v7.0/search</code>。</p>
-<p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。</p>
+<p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。状态码:400 参数错误、401 密钥错误、<b>429 出口 IP 被 Bing 风控/上游限流</b>(深 offset 翻页与 count&gt;10 聚合均可能触发,附 <code>Retry-After</code> 头;遇此错误说明该出口 IP 翻页被 Bing 拦截,第 1 页通常仍可查)、502 其他上游失败。</p>
 <p><b>可选鉴权</b>:设环境变量 <code>BING_API_KEY</code> 后,请求须携带一致的 <code>Ocp-Apim-Subscription-Key</code> 头(或 <code>subscription-key</code> 参数),否则返回官方 401 格式;未设则开放访问。密钥在服务启动时从环境变量读取,不写入配置文件,按部署方式配置:</p>
 <pre><code># 直接运行
 BING_API_KEY=你的密钥 ./bing-search-api

@@ -67,9 +67,10 @@ var (
         // 当前页锚点:class 含 sb_pagS 且无 href(Bing 服务端标注的真实当前页)
         reCurPage = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*\bsb_pagS\b[^"]*"[^>]*>(.*?)</a>`)
         reAriaPage = regexp.MustCompile(`aria-label="Page\s+(\d+)"`)
-        // Bing 自身的下一页链接:FORM=PERE(主)或 sb_pagN 类(备)
-        reNextLink = regexp.MustCompile(`(?is)<a[^>]*href="(/search\?[^"]*FORM=PERE[^"]*)"[^>]*>`)
-        reNextLinkAlt = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*\bsb_pagN\b[^"]*"[^>]*href="([^"?]*/search\?[^"]*)"[^>]*>`)
+        // Bing 自身的下一页链接:FORM=PERE(主)或 sb_pagN 类(备);
+        // 相对(/search?...)与绝对(https://host/search?...)两种形态都接受
+        reNextLink = regexp.MustCompile(`(?is)<a[^>]*href="((?:https?://[^/"]+)?/search\?[^"]*FORM=PERE[^"]*)"[^>]*>`)
+        reNextLinkAlt = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*\bsb_pagN\b[^"]*"[^>]*href="((?:https?://[^"]+)?/search\?[^"]*)"[^>]*>`)
         // 翻页锚点可见文本里的页码(兜底)
         rePageNumText = regexp.MustCompile(`(?is)>\s*([0-9]{1,3})\s*<`)
 )
@@ -170,7 +171,25 @@ const bingPageSize = 10
 // ErrPagingBlocked Bing 忽略翻页参数(疑似出口 IP 风控)。
 // 检测方式:请求 first≥10 时,返回页的当前页标记(sb_pagS)仍是第 1 页。
 // 此时不能静默把第 1 页当后续页返回,必须明确报错。
-var ErrPagingBlocked = errors.New("Bing 忽略了翻页参数 first(疑似出口 IP 被风控):当前仅能返回第 1 页结果,建议更换出口 IP 或降低访问频率")
+var ErrPagingBlocked = errors.New("Bing 忽略了翻页参数 first(疑似出口 IP 被风控):当前翻页不可用(第 1 页结果通常仍可获取),建议更换出口 IP、降低访问频率,或设 BING_BASE=https://cn.bing.com 更换入口后重启")
+
+// upstreamErrorStatus 上游失败的对外状态码决策。
+// 关键经验:相当一部分反代/网关(含 Cloudflare 代理链)会拦截 5xx 并把响应体
+// 替换成自家错误页,客户端只能看到裸 "error code: 502" 而丢失诊断信息;
+// 4xx 响应体则原样透传。因此把“可指导用户行动”的上游错误降为 429:
+//   - ErrPagingBlocked(风控翻页拦截)→ 429 + Retry-After: 300
+//   - Bing 自身 429(配额/频率限制)    → 429 + Retry-After: 60
+// 其余(网络错误、Bing 5xx)保持 502(语义上确实是 Bad Gateway)。
+func upstreamErrorStatus(err error) (status int, retryAfter string) {
+        if errors.Is(err, ErrPagingBlocked) {
+                return http.StatusTooManyRequests, "300"
+        }
+        var es errBingStatus
+        if errors.As(err, &es) && es.code == http.StatusTooManyRequests {
+                return http.StatusTooManyRequests, "60"
+        }
+        return http.StatusBadGateway, ""
+}
 
 // SearchPaged 从 offset 起聚合 count 条结果。
 //
@@ -207,6 +226,7 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
         for page := 0; page < maxFetchPages && len(results) < need; page++ {
                 var body []byte
                 var err error
+                reqFirst := first // 本轮请求的 first 值(校验用)
                 if page == 0 {
                         body, err = e.fetch(ctx, QueryParams{
                                 Term:       pq.Term,
@@ -219,6 +239,7 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
                         if nextHref == "" {
                                 break // SERP 无下一页链接(到末页)
                         }
+                        reqFirst = firstParamOf(nextHref)
                         body, err = e.fetchPageLink(ctx, nextHref, pq)
                 }
                 if err != nil {
@@ -226,13 +247,16 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
                 }
 
                 pageHTML := string(body)
-                if page == 0 {
-                        // 翻页校验:请求页 ≥2 却被服务到第 1 页 → 风控拦截
-                        if first >= bingPageSize {
-                                if served := parseServedPageNum(pageHTML); served == 1 {
-                                        return nil, nil, 0, fmt.Errorf("%w(请求 first=%d,服务端返回第 1 页)", ErrPagingBlocked, first)
-                                }
+                // 翻页校验(对首页直接对齐与后续聚合翻页一视同仁):
+                // 请求 first≥10 却被服务到第 1 页 → 风控拦截。
+                // v1.4.2 修复:此前只校验首轮抓取,count=50 聚合翻页被风控时
+                // 会静默截断成 10 条,用户误以为“翻页无效”却无任何报错。
+                if reqFirst >= bingPageSize {
+                        if served := parseServedPageNum(pageHTML); served == 1 {
+                                return nil, nil, 0, fmt.Errorf("%w(请求 first=%d,服务端返回第 1 页)", ErrPagingBlocked, reqFirst)
                         }
+                }
+                if page == 0 {
                         total = parseTotalResults(pageHTML)
                         _, suggestions = parseBing(pageHTML)
                 }
@@ -277,13 +301,29 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
         return results, suggestions, total, nil
 }
 
-// fetchPageLink 抓取 Bing 自身生成的翻页链接(相对路径)。
+// firstParamOf 从翻页链接(相对或绝对)里解析 first 参数,解析不到返回 0。
+func firstParamOf(href string) int {
+        u, err := url.Parse(strings.ReplaceAll(href, "&amp;", "&"))
+        if err != nil {
+                return 0
+        }
+        n, _ := strconv.Atoi(u.Query().Get("first"))
+        return n
+}
+
+// fetchPageLink 抓取 Bing 自身生成的翻页链接。
 // 链接里已含 q/count/first/FPIG/FORM;此处合并回原始查询的
 // mkt/setlang/adlt(翻页时语言与安全搜索不能丢)。
+// 链接可能是相对(/search?...)或绝对(https://www.bing.com/search?...):
+// 只取其路径与参数,主机固定用 e.Base——尊重运维通过 BING_BASE
+// 指定的入口(如 cn.bing.com),不随 Bing 生成的链接漂移。
 func (e *BingEngine) fetchPageLink(ctx context.Context, href string, pq PagedQuery) ([]byte, error) {
         u, err := url.Parse(strings.ReplaceAll(href, "&amp;", "&"))
-        if err != nil || (u.Path == "" && u.RawQuery == "") {
+        if err != nil || u.Path == "" || u.RawQuery == "" {
                 return nil, fmt.Errorf("翻页链接无效: %q", href)
+        }
+        if u.Path != "/search" {
+                return nil, fmt.Errorf("翻页链接路径异常(仅允许 /search): %q", href)
         }
         params := u.Query()
         if pq.Language != "" {
@@ -293,7 +333,7 @@ func (e *BingEngine) fetchPageLink(ctx context.Context, href string, pq PagedQue
         if pq.SafeStrict {
                 params.Set("adlt", "strict")
         }
-        return e.fetchBing(ctx, e.Base, u.Path, params, acceptLanguageFor(pq.Language))
+        return e.fetchBing(ctx, e.Base, "/search", params, acceptLanguageFor(pq.Language))
 }
 
 // fetch 请求 Bing 搜索页并返回 HTML(最多 5MB)。

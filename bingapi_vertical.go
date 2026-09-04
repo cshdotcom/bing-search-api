@@ -356,12 +356,20 @@ func (s *server) serveV7Vertical(w http.ResponseWriter, r *http.Request, v v7Ver
 	}
 }
 
-// v7VerticalFail 垂直抓取失败的统一 502 输出
+// v7VerticalFail 垂直抓取失败的统一输出。
+// 风控/限流类错误 → 429 + Retry-After(官方 v7 限流语义,4xx 响应体
+// 可穿透网关;5xx 常被网关替换成裸错误页,客户端无法诊断),其余 502。
 func (s *server) v7VerticalFail(w http.ResponseWriter, r *http.Request, vert string, p v7Params, err error) {
 	log.Printf("v7/%s 查询失败 q=%q mkt=%q: %v", vert, p.Q, p.Mkt, err)
-	writeBingV7Error(w, http.StatusBadGateway, bingV7Error{
+	status, retryAfter := upstreamErrorStatus(err)
+	subCode := "UnexpectedError"
+	if status == http.StatusTooManyRequests {
+		subCode = "RequestThrottled"
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	writeBingV7Error(w, status, bingV7Error{
 		Code:    "ServerError",
-		SubCode: "UnexpectedError",
+		SubCode: subCode,
 		Message: "上游 Bing 查询失败: " + err.Error(),
 	})
 }
