@@ -182,12 +182,13 @@ func (s *server) handleBingV7Search(w http.ResponseWriter, r *http.Request) {
 		results     []Result
 		suggestions []string
 		total       int64
+		limited     bool // 上游翻页受限:部分结果仍随 200 返回(v1.4.3)
 	)
 	if wantWeb || wantRelated {
 		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancel()
 		var err error
-		results, suggestions, total, err = s.engine.SearchPaged(ctx, PagedQuery{
+		results, suggestions, total, limited, err = s.engine.SearchPaged(ctx, PagedQuery{
 			Term:       p.Q,
 			Language:   market,
 			Offset:     p.Offset,
@@ -214,6 +215,11 @@ func (s *server) handleBingV7Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := buildBingV7Response(p, market, results, suggestions, total, wantWeb, wantRelated)
+	// 部分结果标记:窗口与第 1 页相交但聚合补齐被上游拦截 →
+	// 已得结果仍返回,响应头 X-Paging-Limited 供客户端识别“本页不全”
+	if limited {
+		w.Header().Set(pagingLimitedHeader, "risk-control")
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

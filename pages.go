@@ -355,7 +355,7 @@ function doSearch(pg){
     url='/search?'+new URLSearchParams(p).toString();
   }
   fetch(url,{headers:headers}).then(function(r){
-    return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d}})
+    return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d,limited:r.headers.get('X-Paging-Limited')}})
   }).then(function(res){
     var ms=Math.round(performance.now()-t0);
     render(res,ms,url,q,lang,cat);
@@ -470,7 +470,10 @@ function render(res,ms,url,q,lang,cat){
   $('#curl').textContent=curlTxt;
   var pagable=cat===''||cat==='images'||cat==='videos';
   updatePager(items,total,pagable);
-  if(items.length===0&&!dict){
+  // v1.4.3:上游翻页受限时的部分结果提示(结果照常展示)
+  if(res.limited){
+    showNotice('warn','本页结果不全:Bing 对服务端会话限制深翻页,仅能返回第 1 页可得部分;图片等垂直端点不受影响');
+  }else if(items.length===0&&!dict){
     showNotice('info',emptyHint(cat));
   }
 }

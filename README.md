@@ -34,10 +34,10 @@
 - `GET /languages` 枚举全部可用语言/市场
 - 未指定语言时自动使用请求的 `Accept-Language` 头
 - 自动还原 Bing `/ck/a` 重定向为真实 URL
-- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取);**翻页与浏览器同源**:按 Bing 自身翻页链接(FORM=PERE/first 0 基)逐页跟随,并对每次翻页做服务端页码校验——出口 IP 被风控导致 Bing 忽略翻页参数时明确报错,绝不静默把第 1 页冒充后续页
+- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取);**翻页与浏览器同源**:按 Bing 自身翻页链接(FORM=PERE/first 0 基)逐页跟随,并对每次翻页做服务端页码校验——Bing 忽略翻页参数时绝不静默把第 1 页冒充后续页:请求窗口整体不可达时返回 429,窗口与第 1 页相交时返回部分结果并附 `X-Paging-Limited` 头(v1.4.3)
 - 零第三方依赖,仅 Go 标准库,单二进制部署
 - 提供全平台发行版(Linux / macOS / Windows × amd64 / arm64 / 386)与 Dockerfile
-- 单元测试 56 项:解析(网页/图片/视频/新闻/词典)、翻页(0 基 first 对齐/跟随 Bing 翻页链接/跨页去重/offset 精确切片/风控校验)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码、SearXNG 开关门禁
+- 单元测试 64 项:解析(网页/图片/视频/新闻/词典)、翻页(0 基 first 对齐/跟随 Bing 翻页链接/跨页去重/offset 精确切片/风控两档语义:硬报错与部分结果)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码、SearXNG 开关门禁
 
 ## 从官方 Bing Web Search API 迁移(v7 兼容)
 
@@ -249,7 +249,7 @@ curl "http://localhost:8080/v7/search?q=golang" -H "Ocp-Apim-Subscription-Key: x
 | 400 | 缺 q / 参数非法 / mkt 不支持 | `InvalidRequest` + `ParameterMissing`/`ParameterInvalid` |
 | 401 | `BING_API_KEY` 已设但密钥不匹配 | `UnauthorizedAccess` |
 | 405 | 方法不支持 | `InvalidRequest` |
-| 429 | 出口 IP 被 Bing 风控(翻页参数被忽略)/ Bing 上游限流 | `ServerError` + `RequestThrottled`,附 `Retry-After` 头 |
+| 429 | Bing 翻页风控(非浏览器会话 first 被忽略,请求窗口整体不可达)/ Bing 上游限流 | `ServerError` + `RequestThrottled`,附 `Retry-After` 头;窗口与第 1 页相交时返回 200 部分结果 + `X-Paging-Limited` 头 |
 | 502 | 其他上游失败(网络错误等) | `ServerError` + `UnexpectedError` |
 
 ```json
@@ -400,7 +400,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | 400 | 类别不支持(如 academic/shopping/maps/未知值) | `{"error":"不支持的搜索类别 academic/学术:Bing 学术搜索页面为纯客户端(JS)渲染,..."}` |
 | 403 | 未设 ENABLE_SEARXNG(默认禁用) | `{"error":"SearXNG 兼容接口已禁用(默认):如需开启,设环境变量 ENABLE_SEARXNG=1 后重启服务;..."}` |
 | 405 | 方法不支持 | `{"error":"仅支持 GET / POST"}` |
-| 429 | 出口 IP 被 Bing 风控(翻页被忽略),附 `Retry-After` 头 | `{"error":"Bing 忽略了翻页参数 first(疑似出口 IP 被风控):..."}` |
+| 429 | Bing 翻页风控(深 offset 窗口不可达),附 `Retry-After` 头 | `{"error":"Bing 忽略了翻页参数 first(非浏览器会话触发 Bing 翻页风控,换 IP 未必解决):..."}` |
 | 502 | 其他上游失败 | `{"error":"Bing 查询失败: ..."}` |
 
 ### 其他端点
@@ -505,8 +505,8 @@ curl "http://localhost:8080/v7/search?q=golang&subscription-key=你的密钥"
 
 - 通过解析 Bing 结果页 HTML 实现,页面结构变化时需要更新 `bing.go` / `vertical.go` 中的正则
 - `language` 映射到 Bing 的 `mkt`/`setlang`,是强提示但非强制:Bing 还会结合出口 IP 的地理定位与查询词本身判断市场,数据中心 IP 上个别查询可能被地理定位干扰(换部署位置或配 `BING_BASE` 可缓解)
-- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP,`offset+count` 很大时仍只翻 6 页;**若出口 IP 被 Bing 风控导致翻页参数失效(深 offset 翻页、count>10 跨页聚合同样受影响),服务会检测到(请求页 ≥2 却被返回第 1 页)并返回 429 明确报错(含风控说明与 `Retry-After`)而非静默返回重复结果或截断结果**——用 429 而非 502 是因为许多反代/网关会把 5xx 响应体替换成自家裸错误页(如 `error code: 502`),客户端将看不到诊断信息,而 4xx 响应体通常原样透传;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
-- 视频搜索 SERP 单页约 50 条,`offset` 超出单页范围为空(无跨页翻页能力);新闻为 RSS 固定批次(约 11~15 条);词典仅中英双向,其他语种词条未覆盖
+- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP。**v1.4.3 实测结论(2026-09,数据中心+家宽双环境验证):Bing 对非浏览器会话忽略 web SERP 的 first 翻页参数——带全套 cookie/浏览器头/HTTP2、跟随 SERP 原生翻页链接、cn/www 入口切换均无法绕过,更换出口 IP 未必解决**。服务行为分两档:① 请求窗口整体在第 1 页之后(offset≥10 且聚合页不可用)→ 429 明确报错(含说明与 `Retry-After`),绝不把第 1 页冒充后续页;② 窗口与第 1 页相交(如首页 count=10/50)→ 返回已得的部分结果并附 `X-Paging-Limited: risk-control` 头,Web 测试界面会提示“本页结果不全”。用 429 而非 502 是因为许多反代/网关会把 5xx 响应体替换成自家裸错误页(如 `error code: 502`),客户端将看不到诊断信息,而 4xx 响应体通常原样透传;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),且实测不受该风控影响,翻页正常;Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
+- 视频搜索 SERP 单页约 50 条,`offset` 超出单页范围为空(无跨页翻页能力);新闻为 RSS 固定批次(约 11~15 条),**中国大陆出口 IP 无法访问 Bing News RSS(cn.bing.com 会把 /news/search?format=rss 重定向到首页),news 端点需海外出口**;词典仅中英双向,其他语种词条未覆盖
 - v7 兼容层只实现网页类答案(webPages + relatedSearches),`responseFilter` 指定其他答案类型时按官方"过滤后为空"语义返回;`totalEstimatedMatches` 是 SERP 计数条上的估计值(垂直端点以 offset+结果数兜底)
 - 仅供学习与个人使用,请遵守 Bing 的服务条款;本服务不是官方 Bing API 的替代品,不提供官方 SLA 与配额语义
 
