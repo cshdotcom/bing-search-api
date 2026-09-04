@@ -115,7 +115,7 @@ curl "http://localhost:__PORT__/search?q=hello&category=dict"             <span 
 curl -X POST http://localhost:__PORT__/search \
      -H "Content-Type: application/json" \
      -d '{"q":"openai","count":5,"page":2,"language":"en-US"}'</code></pre>
-<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持/类别不支持,405 方法错误,429 Bing 翻页风控(附 Retry-After),502 其他上游失败,响应均为 JSON。图片/视频结果附带 SearXNG 垂直字段(<code>template</code>、<code>img_src</code>、<code>thumbnail_src</code>、<code>length</code>、<code>publishedDate</code> 等);词典以 <code>answers</code> 返回词条摘要。深翻页被上游拦截但窗口与第 1 页相交时,返回已得部分结果并附 <code>X-Paging-Limited</code> 头(v1.4.3);新闻端点在中国大陆出口下不可用(cn.bing.com 将 News RSS 重定向至首页,需海外出口)。</p>
+<p style="color:var(--dim);font-size:13.5px">错误:400 缺参/语言不支持/类别不支持,405 方法错误,429 Bing 翻页风控(Yahoo 回退不可用/已关闭时,附 Retry-After),502 其他上游失败,响应均为 JSON。图片/视频结果附带 SearXNG 垂直字段(<code>template</code>、<code>img_src</code>、<code>thumbnail_src</code>、<code>length</code>、<code>publishedDate</code> 等);词典以 <code>answers</code> 返回词条摘要。深翻页被上游拦截但窗口与第 1 页相交时,返回已得部分结果并附 <code>X-Paging-Limited</code> 头(v1.4.3);<b>深页被拦且 Yahoo 可用时自动回退(v1.4.4,默认开启):200 + <code>X-Search-Provider: yahoo</code>,首页聚合缺口由 Yahoo 补齐时为 <code>bing+yahoo</code></b>;新闻端点在中国大陆出口下不可用(cn.bing.com 将 News RSS 重定向至首页,需海外出口)。</p>
 </div>
 
 <div class="card">
@@ -138,7 +138,7 @@ GET http://localhost:__PORT__/v7/search?q=golang&mkt=en-US</code></pre>
 <tr><td><code>setLang</code></td><td>否</td><td>-</td><td>接受但忽略(官方语义仅影响界面字符串)</td></tr>
 </table>
 <p>等价别名(覆盖官方两代路径):<code>/v7.0/search</code> · <code>/bing/v7/search</code> · <code>/bing/v7.0/search</code>。</p>
-<p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。状态码:400 参数错误、401 密钥错误、<b>429 Bing 翻页风控/上游限流</b>(深 offset 窗口整体不可达时触发,附 <code>Retry-After</code> 头;实测该风控针对非浏览器会话,家宽出口同样可能命中,换 IP 未必解决;窗口与第 1 页相交时返回 200 部分结果 + <code>X-Paging-Limited</code> 头,第 1 页通常仍可查)、502 其他上游失败。</p>
+<p>响应结构与官方对齐:<code>_type</code>、<code>queryContext</code>、<code>webPages.webSearchUrl / totalEstimatedMatches / value[](id, name, url, displayUrl, snippet, …)</code>、<code>relatedSearches</code>;错误为官方 <code>ErrorResponse</code> 格式(<code>errors[].code / subCode / message / parameter</code>)。状态码:400 参数错误、401 密钥错误、<b>429 Bing 翻页风控/上游限流</b>(深 offset 窗口整体不可达且 Yahoo 回退不可用/已关闭时触发,附 <code>Retry-After</code> 头;实测该风控针对非浏览器会话,家宽出口同样可能命中,换 IP 未必解决;<b>Yahoo 可用时(默认)深页自动回退:200 + <code>X-Search-Provider: yahoo</code>,offset 语义一致</b>;窗口与第 1 页相交时返回 200 部分结果 + <code>X-Paging-Limited</code> 头或由 Yahoo 补齐(<code>bing+yahoo</code>),第 1 页通常仍可查)、502 其他上游失败。</p>
 <p><b>可选鉴权</b>:设环境变量 <code>BING_API_KEY</code> 后,请求须携带一致的 <code>Ocp-Apim-Subscription-Key</code> 头(或 <code>subscription-key</code> 参数),否则返回官方 401 格式;未设则开放访问。密钥在服务启动时从环境变量读取,不写入配置文件,按部署方式配置:</p>
 <pre><code># 直接运行
 BING_API_KEY=你的密钥 ./bing-search-api
@@ -218,6 +218,8 @@ systemctl disable bing-search-api     <span style="color:#8b97a6"># 取消开机
 <tr><td><code>ENABLE_SEARXNG</code></td><td>关</td><td><b>SearXNG 兼容接口 /search 开关</b>:设 <code>1</code>(或 true/yes/on)开启;不设则该接口返回 403</td></tr>
 <tr><td><code>BING_API_KEY</code></td><td>空</td><td>设置后 /v7/*(含垂直端点)需 <code>Ocp-Apim-Subscription-Key</code> 头(或 subscription-key 参数)匹配,详见上节</td></tr>
 <tr><td><code>BING_DICT_BASE</code></td><td>cn.bing.com</td><td>词典数据源入口(www 域不提供词典服务,固定走 cn;自建反代时可覆盖)</td></tr>
+<tr><td><code>YAHOO_FALLBACK</code></td><td>开</td><td><b>web 深翻页 Yahoo 回退开关</b>(v1.4.4):设 <code>0</code> 关闭;Bing 深页被风控拦截时自动改由 Yahoo(Bing 索引镜像)承接,详见下方说明</td></tr>
+<tr><td><code>YAHOO_BASE</code></td><td>search.yahoo.com</td><td>Yahoo 回退入口(自建反代/镜像时可覆盖)</td></tr>
 </table>
 <pre><code># 直接运行时开启 SearXNG 接口
 ENABLE_SEARXNG=1 ./bing-search-api
@@ -227,6 +229,8 @@ sudo systemctl edit bing-search-api     <span style="color:#8b97a6"># 在编辑�
 #   [Service]
 #   Environment=ENABLE_SEARXNG=1
 sudo systemctl restart bing-search-api</code></pre>
+
+<p style="margin-top:14px"><b>Yahoo 深翻页回退(v1.4.4,默认开启)</b>:Bing web SERP 对非浏览器会话忽略 first 翻页参数(换 IP 无解),深翻页(offset≥10)原本只能诚实报 429。本服务因此引入 Yahoo 回退——<b>Yahoo 网页搜索同为 Bing 索引供给,而其 b 翻页参数(1 基偏移)对非浏览器会话开放</b>(实测任意 b 值生效、中文查询正常)。行为:Bing 深页被拦 → 自动改由 Yahoo 以相同 offset/count 承接整窗(200 + <code>X-Search-Provider: yahoo</code>);首页 count&gt;10 聚合缺口 → Yahoo 续接补齐(<code>bing+yahoo</code>);Yahoo 不可达(如大陆出口)或已关闭(<code>YAHOO_FALLBACK=0</code>)→ 自动降级回 v1.4.3 两档语义。限制:Yahoo 路径不支持 mkt 市场过滤、safeSearch=Strict 不生效;每页约 7 条(单窗口最多 8 页,覆盖 count≤50);排名为 Yahoo 侧 Bing 索引排序,与 bing.com SERP 不逐条对齐。</p>
 </div>
 
 <div class="card">

@@ -355,7 +355,7 @@ function doSearch(pg){
     url='/search?'+new URLSearchParams(p).toString();
   }
   fetch(url,{headers:headers}).then(function(r){
-    return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d,limited:r.headers.get('X-Paging-Limited')}})
+    return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d,limited:r.headers.get('X-Paging-Limited'),provider:r.headers.get('X-Search-Provider')}})
   }).then(function(res){
     var ms=Math.round(performance.now()-t0);
     render(res,ms,url,q,lang,cat);
@@ -473,6 +473,11 @@ function render(res,ms,url,q,lang,cat){
   // v1.4.3:上游翻页受限时的部分结果提示(结果照常展示)
   if(res.limited){
     showNotice('warn','本页结果不全:Bing 对服务端会话限制深翻页,仅能返回第 1 页可得部分;图片等垂直端点不受影响');
+  }else if(res.provider==='yahoo'){
+    // v1.4.4:Bing 深翻页被风控拦截,本窗口由 Yahoo(Bing 索引镜像)承接
+    showNotice('info','本页结果来自 Yahoo(Bing 索引镜像):Bing 对服务端会话限制深翻页,已自动切换 Yahoo 承接,翻页可用');
+  }else if(res.provider==='bing+yahoo'){
+    showNotice('info','本页前段来自 Bing、后段由 Yahoo(Bing 索引镜像)补齐:Bing 限制服务端深翻页,已自动续接');
   }else if(items.length===0&&!dict){
     showNotice('info',emptyHint(cat));
   }

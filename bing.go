@@ -170,11 +170,28 @@ const bingPageSize = 10
 
 // ErrPagingBlocked Bing 忽略翻页参数 first(请求页 ≥2 却被服务到第 1 页)。
 // 实测(2026-09,家宽/数据中心出口多环境验证):这是 Bing 对非浏览器会话的
-// 翻页限制,与出口 IP 是否“干净”关系不大——带全套 cookie/浏览器头/HTTP2、
+// 翻页限制,与出口 IP 是否"干净"关系不大——带全套 cookie/浏览器头/HTTP2、
 // 跟随 SERP 自身翻页链接、改 cn/www 入口均无法绕过;更换出口 IP 未必解决。
 // 影响:web SERP 的深度翻页(offset≥10)与 count>10 跨页聚合补齐不可用;
 // 第 1 页结果正常,图片/视频/词典等垂直端点不受影响。
-var ErrPagingBlocked = errors.New("Bing 忽略了翻页参数 first(非浏览器会话触发 Bing 翻页风控,数据中心与家宽出口均可能命中,换 IP 未必解决):深度翻页当前无法经服务端抓取获取,第 1 页结果通常正常,图片等垂直端点不受影响")
+// v1.4.4:webSearchPaged 在该错误出现时自动回退 Yahoo(同源 Bing 索引,
+// b 翻页参数开放)承接深页窗口;本错误对外抛出意味着 Yahoo 回退同时
+// 不可用(如大陆出口无法直连 search.yahoo.com)或已被 YAHOO_FALLBACK=0 关闭。
+var ErrPagingBlocked = errors.New("Bing 忽略了翻页参数 first(非浏览器会话触发 Bing 翻页风控,数据中心与家宽出口均可能命中,换 IP 未必解决):深度翻页经 Yahoo 回退仍不可达(出口无法直连 search.yahoo.com 或已设 YAHOO_FALLBACK=0 关闭回退);第 1 页结果通常正常,图片等垂直端点不受影响")
+
+// ErrEmptySERP Bing 返回了无法识别为 SERP 的响应(实测 2026-09:突发连续
+// 抓取时偶发 200 + 空/截断响应体)。区别于“无结果”页(含 b_results 容器
+// 与 b_no 提示,如实返回空结果):这是上游异常,应触发 Yahoo 回退,
+// 退不可用时对外 429(可诊断,不静默返回空结果集)。
+var ErrEmptySERP = errors.New("Bing 返回了空/不可解析的 SERP 响应(疑似突发限流或风控拦截瞬断):请稍后重试")
+
+// looksLikeBingSERP 判断响应体是否为可识别的 SERP(而非空响应/挑战墙)。
+// 依据:含结果容器(b_results)、结果项(b_algo)或计数条(sb_count)
+// 任一标记;真实“无结果”页含 b_results 容器,不会被误判。
+func looksLikeBingSERP(body []byte) bool {
+	s := string(body)
+	return strings.Contains(s, `id="b_results"`) || strings.Contains(s, "b_algo") || strings.Contains(s, "sb_count")
+}
 
 // upstreamErrorStatus 上游失败的对外状态码决策。
 // 关键经验:相当一部分反代/网关(含 Cloudflare 代理链)会拦截 5xx 并把响应体
@@ -187,6 +204,9 @@ var ErrPagingBlocked = errors.New("Bing 忽略了翻页参数 first(非浏览器
 func upstreamErrorStatus(err error) (status int, retryAfter string) {
 	if errors.Is(err, ErrPagingBlocked) {
 		return http.StatusTooManyRequests, "300"
+	}
+	if errors.Is(err, ErrEmptySERP) {
+		return http.StatusTooManyRequests, "60"
 	}
 	var es errBingStatus
 	if errors.As(err, &es) && es.code == http.StatusTooManyRequests {
@@ -258,6 +278,12 @@ func (e *BingEngine) SearchPaged(ctx context.Context, pq PagedQuery) ([]Result, 
 		}
 
 		pageHTML := string(body)
+		// 首轮响应体不含任何 SERP 标记(空/挑战墙/截断)→ 上游异常:
+		// 报 ErrEmptySERP 触发 Yahoo 回退(v1.4.4);回退不可用时对外 429,
+		// 不再静默返回空结果集。后续聚合页遇同情形维持部分结果语义。
+		if page == 0 && !looksLikeBingSERP(body) {
+			return nil, nil, 0, false, fmt.Errorf("%w(响应体 %d 字节,无 b_results/b_algo/sb_count 标记)", ErrEmptySERP, len(body))
+		}
 		// 翻页校验:请求 first≥10 却被服务到第 1 页 → 翻页被上游拦截。
 		// v1.4.2 引入;v1.4.3 细化:仅当窗口整体不可达(首轮即被拦)才硬报错,
 		// 聚合补齐被拦时降级为部分结果 + limited 标记(见函数头注释)。

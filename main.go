@@ -196,6 +196,14 @@ func printHelp(w *os.File) {
   -host IP     监听地址(默认 0.0.0.0)
   -bing URL    Bing 入口(默认 https://www.bing.com,可设 https://cn.bing.com)
 
+环境变量(完整说明见 /help 与 README):
+  YAHOO_FALLBACK=0      关闭 web 深翻页 Yahoo 回退(默认开启;Bing 深页被风控
+                        拦截时由 Yahoo 同源 Bing 索引承接,响应附
+                        X-Search-Provider 头)
+  YAHOO_BASE=URL        Yahoo 回退入口(默认 https://search.yahoo.com)
+  ENABLE_SEARXNG=1      开启 SearXNG 兼容接口(默认关)
+  BING_API_KEY=密钥     v7 端点鉴权(默认开放)
+
 install 专属参数:
   -no-start    只注册服务,不立即启动
 
@@ -251,6 +259,10 @@ func serve(port, host, bingBase string) {
 			Base:   bingBase,
 			Client: &http.Client{Timeout: 15 * time.Second},
 		},
+		yahoo: &YahooEngine{
+			Base:   envOr("YAHOO_BASE", yahooDefaultBase),
+			Client: &http.Client{Timeout: 15 * time.Second},
+		},
 	}
 
 	mux := srv.routes()
@@ -291,9 +303,10 @@ func serve(port, host, bingBase string) {
 	log.Println("已退出")
 }
 
-// server 持有引擎引用
+// server 持有引擎引用(engine=Bing 主引擎;yahoo=web 深翻页回退引擎,v1.4.4)
 type server struct {
 	engine *BingEngine
+	yahoo  *YahooEngine
 }
 
 // routes 注册全部 HTTP 路由(serve 与单元测试共用)。
@@ -392,9 +405,10 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// 网页综合搜索:多页聚合(与 v7 同源引擎),
 	// offset = (page-1)*count → 精确对齐 SearXNG 页语义,
-	// count>10 时自动跨 SERP 页补齐,不再出现“页间跳空”
+	// count>10 时自动跨 SERP 页补齐,不再出现“页间跳空”;
+	// 深翻页被 Bing 风控拦截时自动回退 Yahoo(Bing 索引镜像,v1.4.4)
 	offset := (p.Page - 1) * p.Count
-	results, suggestions, _, limited, err := s.engine.SearchPaged(ctx, PagedQuery{
+	results, suggestions, _, provider, limited, err := s.webSearchPaged(ctx, PagedQuery{
 		Term:     p.Q,
 		Language: market,
 		Offset:   offset,
@@ -437,6 +451,10 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if limited {
 		log.Printf("翻页受限(返回部分结果) q=%q lang=%q page=%d: 上游忽略 first", p.Q, market, p.Page)
 		w.Header().Set(pagingLimitedHeader, "risk-control")
+	}
+	// 结果来源标记(v1.4.4):深翻页回退 Yahoo 时如实告知客户端
+	if provider != "" && provider != "bing" {
+		w.Header().Set(searchProviderHeader, provider)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -564,7 +582,7 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ocp-Apim-Subscription-Key, X-MSEdge-ClientID")
-		w.Header().Set("Access-Control-Expose-Headers", "Retry-After, X-Paging-Limited")
+		w.Header().Set("Access-Control-Expose-Headers", "Retry-After, X-Paging-Limited, X-Search-Provider")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

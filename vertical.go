@@ -25,8 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"html"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -671,41 +669,29 @@ func acceptLanguageFor(market string) string {
 
 // fetchBing 向指定 Bing 主机请求任意路径(垂直搜索共用),
 // 最多读取 5MB,与 bing.go fetch 保持一致的浏览器伪装头。
+// 具体请求逻辑由 fetchHTTP 统一承载(yahoo.go,Bing/Yahoo 共用)。
 func (e *BingEngine) fetchBing(ctx context.Context, baseURL, path string, params url.Values, acceptLang string) ([]byte, error) {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, err
-	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + path
-	u.RawQuery = params.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", acceptLang)
-
-	resp, err := e.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, errBingStatus{path: path, code: resp.StatusCode}
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	return fetchHTTP(ctx, e.Client, baseURL, path, params, acceptLang, "Bing")
 }
 
-// errBingStatus Bing 返回非 200 的结构化错误(fetch 共用)
-type errBingStatus struct {
+// errUpstreamStatus 任意上游返回非 200 的结构化错误(fetch 共用)。
+// host 为空时对外显示 "Bing"(历史行为),否则显示实际主机名。
+type errUpstreamStatus struct {
+	host string
 	path string
 	code int
 }
 
-func (e errBingStatus) Error() string {
-	return "Bing 返回状态码 " + strconv.Itoa(e.code) + " (" + e.path + ")"
+// errBingStatus 历史名保留(类型别名):既有代码与 upstreamErrorStatus
+// 的 errors.As 判定无需改动
+type errBingStatus = errUpstreamStatus
+
+func (e errUpstreamStatus) Error() string {
+	who := e.host
+	if who == "" {
+		who = "Bing"
+	}
+	return who + " 返回状态码 " + strconv.Itoa(e.code) + " (" + e.path + ")"
 }
 
 // ── 时长/日期换算(v7 兼容层用)──────────────────────────────

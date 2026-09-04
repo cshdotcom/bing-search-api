@@ -34,10 +34,10 @@
 - `GET /languages` 枚举全部可用语言/市场
 - 未指定语言时自动使用请求的 `Accept-Language` 头
 - 自动还原 Bing `/ck/a` 重定向为真实 URL
-- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取);**翻页与浏览器同源**:按 Bing 自身翻页链接(FORM=PERE/first 0 基)逐页跟随,并对每次翻页做服务端页码校验——Bing 忽略翻页参数时绝不静默把第 1 页冒充后续页:请求窗口整体不可达时返回 429,窗口与第 1 页相交时返回部分结果并附 `X-Paging-Limited` 头(v1.4.3)
+- 支持 GET / POST(表单与 JSON)、分页、每页条数;v7 兼容端点支持 offset 多页聚合(最多 6 次抓取);**翻页与浏览器同源**:按 Bing 自身翻页链接(FORM=PERE/first 0 基)逐页跟随,并对每次翻页做服务端页码校验——Bing 忽略翻页参数时绝不静默把第 1 页冒充后续页:请求窗口整体不可达时返回 429,窗口与第 1 页相交时返回部分结果并附 `X-Paging-Limited` 头(v1.4.3);**深翻页 Yahoo 回退(v1.4.4,默认开启)**:Bing 深页被风控拦截时自动改由 Yahoo(同为 Bing 索引供给,b 翻页参数对非浏览器会话开放)承接同一 offset 窗口,响应附 `X-Search-Provider: yahoo|bing+yahoo` 头如实标记来源
 - 零第三方依赖,仅 Go 标准库,单二进制部署
 - 提供全平台发行版(Linux / macOS / Windows × amd64 / arm64 / 386)与 Dockerfile
-- 单元测试 64 项:解析(网页/图片/视频/新闻/词典)、翻页(0 基 first 对齐/跟随 Bing 翻页链接/跨页去重/offset 精确切片/风控两档语义:硬报错与部分结果)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码、SearXNG 开关门禁
+- 单元测试 88 项:解析(网页/图片/视频/新闻/词典/Yahoo)、翻页(0 基 first 对齐/跟随 Bing 翻页链接/跨页去重/offset 精确切片/风控两档语义:硬报错与部分结果/Yahoo b 参数聚合与网络重试/回退矩阵:整窗接管·补齐·失败降级·开关)、类别归一、v7 垂直端点(路由/鉴权/参数/响应组装/伪上游端到端)、语言解析、重定向解码(RU=/u=a1)、SearXNG 开关门禁
 
 ## 从官方 Bing Web Search API 迁移(v7 兼容)
 
@@ -249,7 +249,7 @@ curl "http://localhost:8080/v7/search?q=golang" -H "Ocp-Apim-Subscription-Key: x
 | 400 | 缺 q / 参数非法 / mkt 不支持 | `InvalidRequest` + `ParameterMissing`/`ParameterInvalid` |
 | 401 | `BING_API_KEY` 已设但密钥不匹配 | `UnauthorizedAccess` |
 | 405 | 方法不支持 | `InvalidRequest` |
-| 429 | Bing 翻页风控(非浏览器会话 first 被忽略,请求窗口整体不可达)/ Bing 上游限流 | `ServerError` + `RequestThrottled`,附 `Retry-After` 头;窗口与第 1 页相交时返回 200 部分结果 + `X-Paging-Limited` 头 |
+| 429 | Bing 翻页风控(非浏览器会话 first 被忽略,请求窗口整体不可达且 Yahoo 回退不可用/已关闭)/ Bing 上游限流 | `ServerError` + `RequestThrottled`,附 `Retry-After` 头;窗口与第 1 页相交时返回 200 部分结果 + `X-Paging-Limited` 头;深页被拦且 Yahoo 可用时自动回退(200 + `X-Search-Provider: yahoo`) |
 | 502 | 其他上游失败(网络错误等) | `ServerError` + `UnexpectedError` |
 
 ```json
@@ -400,7 +400,7 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | 400 | 类别不支持(如 academic/shopping/maps/未知值) | `{"error":"不支持的搜索类别 academic/学术:Bing 学术搜索页面为纯客户端(JS)渲染,..."}` |
 | 403 | 未设 ENABLE_SEARXNG(默认禁用) | `{"error":"SearXNG 兼容接口已禁用(默认):如需开启,设环境变量 ENABLE_SEARXNG=1 后重启服务;..."}` |
 | 405 | 方法不支持 | `{"error":"仅支持 GET / POST"}` |
-| 429 | Bing 翻页风控(深 offset 窗口不可达),附 `Retry-After` 头 | `{"error":"Bing 忽略了翻页参数 first(非浏览器会话触发 Bing 翻页风控,换 IP 未必解决):..."}` |
+| 429 | Bing 翻页风控(深 offset 窗口不可达且 Yahoo 回退不可用/已关闭),附 `Retry-After` 头;Yahoo 可用时自动回退(200 + `X-Search-Provider: yahoo`) | `{"error":"Bing 忽略了翻页参数 first(非浏览器会话触发 Bing 翻页风控,换 IP 未必解决):..."}` |
 | 502 | 其他上游失败 | `{"error":"Bing 查询失败: ..."}` |
 
 ### 其他端点
@@ -429,8 +429,22 @@ curl http://localhost:8080/languages | python3 -m json.tool
 | `ENABLE_SEARXNG` | 关 | **SearXNG 兼容接口 `/search` 开关**:设 `1`(或 true/yes/on)开启;不设则该接口返回 403(安全考虑,见下节) |
 | `BING_API_KEY` | 空 | 设置后 `/v7/*`(含垂直端点)要求 `Ocp-Apim-Subscription-Key` 头(或 `subscription-key` 参数)与之匹配;不设则开放访问 |
 | `BING_DICT_BASE` | `https://cn.bing.com` | 词典数据源入口(www 域不提供词典服务,固定走 cn;自建反代时可覆盖) |
+| `YAHOO_FALLBACK` | 开 | **web 深翻页 Yahoo 回退开关**(v1.4.4):设 `0`(或 false/no/off)关闭;关闭后恢复 v1.4.3 行为(深页 429 / 部分结果+`X-Paging-Limited`) |
+| `YAHOO_BASE` | `https://search.yahoo.com` | Yahoo 回退入口(自建反代/镜像时可覆盖) |
 
-### SearXNG 兼容接口开关(ENABLE_SEARXNG,默认关)
+### Yahoo 深翻页回退(YAHOO_FALLBACK,默认开,v1.4.4)
+
+Bing web SERP 对非浏览器会话忽略 first 翻页参数(换 IP 无解,见「局限与声明」),导致服务端深翻页(offset≥10)原本只能诚实报 429。v1.4.4 起引入 Yahoo 回退:**Yahoo 网页搜索同为 Bing 索引供给,且其 b 翻页参数(1 基偏移)对非浏览器会话开放**(2026-09 数据中心出口实测:b=1/11/15/64 互不重合、任意 b 值生效、中文查询正常)。行为如下:
+
+- Bing 正常服务窗口(第 1 页/未触发风控)→ 行为与 v1.4.3 完全一致,纯 Bing 结果
+- Bing 深页被风控拦截(offset≥10 窗口不可达)→ 自动改由 Yahoo 以相同 offset/count 承接整窗,返回 200 + `X-Search-Provider: yahoo`
+- 首页 count>10 聚合被拦(部分结果+`X-Paging-Limited`)→ Yahoo 从缺口续接补齐窗口,返回 `X-Search-Provider: bing+yahoo`,补满后不再附 limited 头
+- Yahoo 也失败(如大陆出口无法直连 search.yahoo.com)→ 优雅降级,维持原 Bing 429 语义(可诊断);Yahoo 网络类瞬断自动重试一次(300ms 退避)
+- 响应头已加入 CORS Expose-Headers,前端/测试界面会提示“本页结果来自 Yahoo”
+
+限制(诚实声明):Yahoo 路径**不支持 mkt/setlang 市场过滤**(中文查询仍返回中文结果)且 **safeSearch=Strict 不生效**;SERP 每页固定约 7 条(单窗口最多抓 8 页,覆盖 count≤50);无总结果计数(total 以 offset+条数兜底);排名为 Yahoo 侧 Bing 索引排序,与 bing.com SERP 不逐条对齐;**中国大陆出口无法直连 search.yahoo.com**,该环境自动退回纯 Bing 行为。关闭回退:设 `YAHOO_FALLBACK=0` 后重启。
+
+#### SearXNG 兼容接口开关(ENABLE_SEARXNG,默认关)
 
 `/search` 是无鉴权的 SearXNG 风格开放接口,部署在公网时任何知道地址的人都能把你的服务当**匿名搜索代理**用:流量耗在别人身上、Bing 风控连坐到你的出口 IP。因此 v1.3.0 起**默认关闭**,仅在确需 SearXNG 兼容时显式开启:
 
@@ -505,7 +519,7 @@ curl "http://localhost:8080/v7/search?q=golang&subscription-key=你的密钥"
 
 - 通过解析 Bing 结果页 HTML 实现,页面结构变化时需要更新 `bing.go` / `vertical.go` 中的正则
 - `language` 映射到 Bing 的 `mkt`/`setlang`,是强提示但非强制:Bing 还会结合出口 IP 的地理定位与查询词本身判断市场,数据中心 IP 上个别查询可能被地理定位干扰(换部署位置或配 `BING_BASE` 可缓解)
-- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP。**v1.4.3 实测结论(2026-09,数据中心+家宽双环境验证):Bing 对非浏览器会话忽略 web SERP 的 first 翻页参数——带全套 cookie/浏览器头/HTTP2、跟随 SERP 原生翻页链接、cn/www 入口切换均无法绕过,更换出口 IP 未必解决**。服务行为分两档:① 请求窗口整体在第 1 页之后(offset≥10 且聚合页不可用)→ 429 明确报错(含说明与 `Retry-After`),绝不把第 1 页冒充后续页;② 窗口与第 1 页相交(如首页 count=10/50)→ 返回已得的部分结果并附 `X-Paging-Limited: risk-control` 头,Web 测试界面会提示“本页结果不全”。用 429 而非 502 是因为许多反代/网关会把 5xx 响应体替换成自家裸错误页(如 `error code: 502`),客户端将看不到诊断信息,而 4xx 响应体通常原样透传;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),且实测不受该风控影响,翻页正常;Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)
+- 高频调用可能触发 Bing 风控(验证码 / 空结果),请合理控制频率;v7 端点单次请求最多聚合 6 页 SERP。**v1.4.3 实测结论(2026-09,数据中心+家宽双环境验证):Bing 对非浏览器会话忽略 web SERP 的 first 翻页参数——带全套 cookie/浏览器头/HTTP2、跟随 SERP 原生翻页链接、cn/www 入口切换均无法绕过,更换出口 IP 未必解决**。服务行为分两档:① 请求窗口整体在第 1 页之后(offset≥10 且聚合页不可用)→ 429 明确报错(含说明与 `Retry-After`),绝不把第 1 页冒充后续页;② 窗口与第 1 页相交(如首页 count=10/50)→ 返回已得的部分结果并附 `X-Paging-Limited: risk-control` 头,Web 测试界面会提示“本页结果不全”。用 429 而非 502 是因为许多反代/网关会把 5xx 响应体替换成自家裸错误页(如 `error code: 502`),客户端将看不到诊断信息,而 4xx 响应体通常原样透传;图片 async 端点的 `first` 为 1 基(与网页 SERP 的 0 基不同),且实测不受该风控影响,翻页正常;Web SERP 翻页链接实测为 0 基、10 的倍数(第 2 页 first=10)。**v1.4.4 深翻页解法:Yahoo 回退(默认开启,见「配置」节)**——Yahoo 同为 Bing 索引供给且 b 翻页参数对非浏览器会话开放,深页窗口由 Yahoo 承接(offset 语义一致),响应 `X-Search-Provider` 头标记来源;大陆出口无法直连 Yahoo 时自动降级回上述两档语义
 - 视频搜索 SERP 单页约 50 条,`offset` 超出单页范围为空(无跨页翻页能力);新闻为 RSS 固定批次(约 11~15 条),**中国大陆出口 IP 无法访问 Bing News RSS(cn.bing.com 会把 /news/search?format=rss 重定向到首页),news 端点需海外出口**;词典仅中英双向,其他语种词条未覆盖
 - v7 兼容层只实现网页类答案(webPages + relatedSearches),`responseFilter` 指定其他答案类型时按官方"过滤后为空"语义返回;`totalEstimatedMatches` 是 SERP 计数条上的估计值(垂直端点以 offset+结果数兜底)
 - 仅供学习与个人使用,请遵守 Bing 的服务条款;本服务不是官方 Bing API 的替代品,不提供官方 SLA 与配额语义
